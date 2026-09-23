@@ -37,6 +37,11 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Mes reglages" in page
     assert "Station favorite" in page
     assert "Variation" in page
+    assert "Moyenne des stations suivies" in page
+    assert "Historique de cette station" in page
+    assert "Prix sur les 30 derniers jours" in page
+    assert "data-station" in page
+    assert "--accent:#d7c7ad" in page
 
 
 def test_dashboard_has_empty_state(tmp_path, monkeypatch) -> None:

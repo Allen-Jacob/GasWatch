@@ -32,7 +32,7 @@ def _age_label(timestamp: str) -> tuple[str, str]:
     return f"il y a {hours // 24} j", "stale"
 
 
-def _sparkline(points: list[float]) -> str:
+def _sparkline(points: list[float], label: str = "Evolution du prix") -> str:
     if not points:
         return '<div class="empty-chart">Historique en construction</div>'
     width, height, padding = 560, 118, 8
@@ -45,7 +45,7 @@ def _sparkline(points: list[float]) -> str:
         coords.append(f"{x:.1f},{y:.1f}")
     return (
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
-        f'aria-label="Evolution du prix minimum"><polyline points="{" ".join(coords)}" />'
+        f'aria-label="{html.escape(label)}"><polyline points="{" ".join(coords)}" />'
         f'<text x="8" y="16">{high:.1f}</text><text x="8" y="110">{low:.1f}</text></svg>'
     )
 
@@ -53,9 +53,15 @@ def _sparkline(points: list[float]) -> str:
 def render_dashboard(repository: Repository, settings: Settings) -> str:
     snapshot = repository.dashboard_snapshot(settings.max_price_age_minutes)
     history = repository.dashboard_history(settings.history_days)
+    station_history = repository.dashboard_station_history(settings.history_days)
     grouped_history: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for row in history:
         grouped_history[(row["location_key"], row["fuel_type"])].append(row)
+    grouped_station_history: dict[tuple[str, str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in station_history:
+        grouped_station_history[
+            (str(row["location_key"]), str(row["fuel_type"]), str(row["station_id"]))
+        ].append(row)
 
     groups: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for row in snapshot:
@@ -74,31 +80,63 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         f"{html.escape(str(row['name']))} — {float(row['price_cents']):.1f} c/L</option>"
         for row in snapshot
     )
+
+    def metric(value: float | None, suffix: str = " c/L") -> str:
+        return f"{value:+.1f}{suffix}" if value is not None else "—"
+
     sections: list[str] = []
     for (location_key, fuel_type), stations in groups.items():
         best = stations[0]
         average = sum(float(item["price_cents"]) for item in stations) / len(stations)
         age, freshness = _age_label(str(best["fetched_at"]))
-        rows = "".join(
-            "<tr>"
-            f"<td><strong>{html.escape(str(item['name']))}</strong>"
-            f"<span>{html.escape(str(item['address']))}</span></td>"
-            f'<td class="price">{float(item["price_cents"]):.1f}<small> c/L</small></td>'
-            f"<td>{float(item['distance_km']):.1f} km</td>"
-            f"<td>{html.escape(_age_label(str(item['fetched_at']))[0])}</td>"
-            "</tr>"
-            for item in stations[:12]
-        )
+        station_cards: list[str] = []
+        for item in stations[:12]:
+            station_id = str(item["station_id"])
+            station_points = [
+                float(point["price_cents"])
+                for point in grouped_station_history[(location_key, fuel_type, station_id)]
+            ]
+            station_min = min(station_points) if station_points else None
+            station_max = max(station_points) if station_points else None
+            station_change = (
+                station_points[-1] - station_points[0] if len(station_points) > 1 else None
+            )
+            station_key = "station-" + "".join(
+                character if character.isalnum() else "-"
+                for character in f"{location_key}-{fuel_type}-{station_id}"
+            )
+            station_cards.append(
+                f"""
+                <details class="station-card" id="{html.escape(station_key)}" data-station>
+                  <summary>
+                    <span class="station-name"><strong>{html.escape(str(item["name"]))}</strong>
+                      <small>{html.escape(str(item["address"]))}</small></span>
+                    <span class="station-price">{float(item["price_cents"]):.1f}<small> c/L</small></span>
+                    <span>{float(item["distance_km"]):.1f} km</span>
+                    <span>{html.escape(_age_label(str(item["fetched_at"]))[0])}</span>
+                  </summary>
+                  <div class="station-detail">
+                    <div><p class="eyebrow">Historique de cette station</p>
+                      <h3>Prix sur les {settings.history_days} derniers jours</h3></div>
+                    {_sparkline(station_points, f"Prix sur {settings.history_days} jours pour {item['name']}")}
+                    <div class="station-stats">
+                      <div><span>Minimum</span><strong>{metric(station_min).lstrip("+")}</strong></div>
+                      <div><span>Maximum</span><strong>{metric(station_max).lstrip("+")}</strong></div>
+                      <div><span>Variation</span><strong>{metric(station_change)}</strong></div>
+                      <div><span>Jours suivis</span><strong>{len(station_points)}</strong></div>
+                    </div>
+                  </div>
+                </details>
+                """
+            )
+        station_list = "".join(station_cards)
         market_history = grouped_history[(location_key, fuel_type)]
-        minimums = [float(item["minimum"]) for item in market_history]
-        chart = _sparkline(minimums)
-        history_min = min(minimums) if minimums else None
-        history_max = max(minimums) if minimums else None
-        history_avg = sum(minimums) / len(minimums) if minimums else None
-        change = minimums[-1] - minimums[0] if len(minimums) > 1 else None
-
-        def metric(value: float | None, suffix: str = " c/L") -> str:
-            return f"{value:+.1f}{suffix}" if value is not None else "—"
+        averages = [float(item["average"]) for item in market_history]
+        chart = _sparkline(averages, "Moyenne quotidienne des stations suivies")
+        history_min = min(averages) if averages else None
+        history_max = max(averages) if averages else None
+        history_avg = sum(averages) / len(averages) if averages else None
+        change = averages[-1] - averages[0] if len(averages) > 1 else None
 
         stats_cards = (
             f"<div><span>Minimum</span><strong>{metric(history_min).lstrip('+')}</strong></div>"
@@ -120,11 +158,12 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                   <p>{html.escape(str(best["name"]))}</p></article>
                 <article><span>Moyenne locale</span><strong>{average:.1f}<small> c/L</small></strong>
                   <p>{len(stations)} stations conservees</p></article>
-                <article class="trend"><span>Minimums — {settings.history_days} jours</span>
+                <article class="trend"><span>Moyenne des stations suivies — {settings.history_days} jours</span>
                   {chart}<div class="history-stats">{stats_cards}</div></article>
               </div>
-              <div class="table-wrap"><table><thead><tr><th>Station</th><th>Prix</th>
-                <th>Distance*</th><th>Releve</th></tr></thead><tbody>{rows}</tbody></table></div>
+              <div class="station-list-head"><span>Station</span><span>Prix</span>
+                <span>Distance*</span><span>Releve</span></div>
+              <div class="station-list">{station_list}</div>
             </section>
             """
         )
@@ -142,42 +181,59 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta name="description" content="Tableau de bord local GasWatch">
 <meta http-equiv="refresh" content="60"><title>GasWatch</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1714'/%3E%3Cpath d='M18 12h25v43H18z' fill='%23f4b942'/%3E%3Cpath d='M23 18h15v13H23z' fill='%230d1714'/%3E%3Cpath d='M43 22c8 1 6 14 6 21 0 5 6 5 6 0V28' fill='none' stroke='%23f4b942' stroke-width='5'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111110'/%3E%3Cpath d='M18 12h25v43H18z' fill='%23d7c7ad'/%3E%3Cpath d='M23 18h15v13H23z' fill='%23111110'/%3E%3Cpath d='M43 22c8 1 6 14 6 21 0 5 6 5 6 0V28' fill='none' stroke='%23d7c7ad' stroke-width='5'/%3E%3C/svg%3E">
 <style>
-:root{{--ink:#ecf4f0;--muted:#8fa49b;--panel:#13231e;--panel2:#192d26;--line:#29433a;
---accent:#f4b942;--green:#65d69e;--orange:#ef9564;--red:#e66f6f}}*{{box-sizing:border-box}}
-body{{margin:0;background:#09120f;color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,sans-serif}}
+:root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;
+--accent:#d7c7ad;--soft:#ece6da;--dim:#7d7971;--black:#0e0e0d}}*{{box-sizing:border-box}}
+body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,sans-serif}}
 .shell{{width:min(1180px,calc(100% - 32px));margin:auto;padding:34px 0 64px}}
 header{{display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px}}
 h1{{font-size:clamp(2rem,5vw,4rem);letter-spacing:-.06em;line-height:.9;margin:0}}h1 b{{color:var(--accent)}}
-header p,.meta,td span,article p{{color:var(--muted);margin:.35rem 0 0;font-size:.875rem}}
+header p,.meta,article p{{color:var(--muted);margin:.35rem 0 0;font-size:.875rem}}
 .market{{background:var(--panel);border:1px solid var(--line);border-radius:18px;overflow:hidden;margin-bottom:24px}}
 .market-head{{display:flex;align-items:center;justify-content:space-between;padding:24px 26px 18px}}
 .eyebrow{{color:var(--accent);font-size:.75rem;font-weight:800;letter-spacing:.15em;margin:0;text-transform:uppercase}}
-h2{{margin:2px 0 0;font-size:1.5rem}}.status{{font-size:.78rem;padding:6px 10px;border-radius:99px;background:#203d33}}
-.status.fresh{{color:var(--green)}}.status.aging{{color:var(--orange)}}.status.stale{{color:var(--red)}}
+h2{{margin:2px 0 0;font-size:1.5rem}}h3{{margin:2px 0 0;font-size:1.1rem}}
+.status{{font-size:.78rem;padding:6px 10px;border-radius:99px;background:var(--panel2);border:1px solid var(--line)}}
+.status.fresh{{color:var(--soft)}}.status.aging{{color:var(--accent)}}.status.stale{{color:var(--dim)}}
 .summary-grid{{display:grid;grid-template-columns:1fr 1fr 2fr;border-block:1px solid var(--line)}}
 article{{min-height:150px;padding:22px 26px;border-right:1px solid var(--line)}}article:last-child{{border:0}}
 article>span{{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.08em}}
 article strong{{display:block;font-size:2.3rem;margin-top:12px;letter-spacing:-.04em}}article small{{font-size:.9rem;color:var(--muted)}}
 .hero-price{{background:var(--panel2)}}.hero-price strong{{color:var(--accent)}}.chart{{display:block;width:100%;height:90px;margin-top:8px}}
-.chart polyline{{fill:none;stroke:var(--green);stroke-width:4;stroke-linejoin:round;stroke-linecap:round}}
+.chart polyline{{fill:none;stroke:var(--accent);stroke-width:4;stroke-linejoin:round;stroke-linecap:round}}
 .chart text{{fill:var(--muted);font-size:12px}}.empty-chart{{color:var(--muted);padding-top:35px}}
 .settings{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;margin-bottom:24px}}
 .settings h2{{margin-bottom:14px}}form{{display:grid;grid-template-columns:1fr 1fr .7fr 1.5fr auto;gap:12px;align-items:end}}
 label{{display:grid;gap:6px;color:var(--muted);font-size:.8rem}}input,select,button{{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}}
-input,select{{background:#0d1915;color:var(--ink);min-width:0}}button{{background:var(--accent);color:#171306;font-weight:800;cursor:pointer}}
-.settings>p{{color:var(--muted);font-size:.8rem;margin:12px 0 0}}.notice{{background:#173a2c;color:var(--green);padding:10px 14px;border-radius:9px;margin-bottom:14px}}
-.history-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}}.history-stats div{{background:#0e1b17;padding:8px;border-radius:8px}}
+input,select{{background:#10100f;color:var(--ink);min-width:0}}button{{background:var(--accent);color:#171512;font-weight:800;cursor:pointer}}
+button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:.8rem;margin:12px 0 0}}
+.notice{{background:var(--panel2);color:var(--soft);border:1px solid var(--accent);padding:10px 14px;border-radius:9px;margin-bottom:14px}}
+.history-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}}.history-stats div{{background:#111110;padding:8px;border-radius:8px}}
 .history-stats span{{display:block;color:var(--muted);font-size:.65rem;text-transform:uppercase}}.history-stats strong{{font-size:.9rem;margin:2px 0 0;letter-spacing:0}}
-.table-wrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:14px 26px;border-bottom:1px solid var(--line)}}
-th{{color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.08em}}td span{{display:block;white-space:nowrap}}td.price{{color:var(--accent);font-size:1.2rem;font-weight:800}}
-tbody tr:last-child td{{border:0}}.empty{{text-align:center;padding:80px 24px;background:var(--panel);border:1px solid var(--line);border-radius:18px}}
+.station-list-head,.station-card summary{{display:grid;grid-template-columns:minmax(260px,1fr) 130px 120px 130px;align-items:center;gap:16px;padding:13px 26px}}
+.station-list-head{{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--line)}}
+.station-card{{border-bottom:1px solid var(--line)}}.station-card:last-child{{border-bottom:0}}
+.station-card summary{{cursor:pointer;list-style:none;transition:background .18s ease}}.station-card summary::-webkit-details-marker{{display:none}}
+.station-card summary:hover,.station-card[open] summary{{background:var(--panel2)}}
+.station-card summary::after{{content:'+';color:var(--accent);font-size:1.25rem;position:absolute;right:10px}}
+.station-card[open] summary::after{{content:'−'}}.station-card summary{{position:relative}}
+.station-card summary>span{{color:var(--muted);font-size:.88rem}}.station-name strong{{display:block;color:var(--ink);font-size:1rem}}
+.station-name small{{display:block;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.station-price{{color:var(--accent)!important;font-size:1.2rem!important;font-weight:800}}.station-price small{{font-size:.75rem}}
+.station-detail{{display:grid;grid-template-columns:1fr 2fr;gap:16px 28px;padding:20px 26px 26px;background:#111110;border-top:1px solid var(--line)}}
+.station-detail .chart{{height:118px;margin:0}}.station-stats{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}
+.station-stats div{{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel)}}
+.station-stats span{{display:block;color:var(--muted);font-size:.68rem;text-transform:uppercase}}.station-stats strong{{font-size:1rem}}
+.empty{{text-align:center;padding:80px 24px;background:var(--panel);border:1px solid var(--line);border-radius:18px}}
 .pump{{font-size:3rem}}footer{{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:.8rem;margin-top:24px}}
 @media(max-width:760px){{.shell{{width:min(100% - 20px,1180px);padding-top:22px}}header{{align-items:start}}header>p{{text-align:right;max-width:160px}}
 .settings{{padding:18px}}form{{grid-template-columns:1fr 1fr}}form label:nth-child(4),form button{{grid-column:1/-1}}
 .summary-grid{{grid-template-columns:1fr 1fr}}article{{padding:18px;min-height:130px}}article.trend{{grid-column:1/-1;border-top:1px solid var(--line)}}
-th,td{{padding:12px 18px}}th:nth-child(4),td:nth-child(4){{display:none}}footer{{display:block}}}}
+.station-list-head{{display:none}}.station-card summary{{grid-template-columns:1fr auto;padding:15px 18px 15px 18px}}
+.station-card summary>span:nth-child(3),.station-card summary>span:nth-child(4){{display:none}}.station-card summary::after{{right:8px}}
+.station-price{{padding-right:22px}}.station-detail{{grid-template-columns:1fr;padding:18px}}.station-stats{{grid-template-columns:1fr 1fr}}
+footer{{display:block}}}}
 </style></head><body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
 <p>Prix recents autour de vos emplacements</p></div><p>Actualisation automatique<br>toutes les 60 secondes</p></header>
 <section class="settings"><h2>Mes reglages</h2>
@@ -191,7 +247,14 @@ th,td{{padding:12px 18px}}th:nth-child(4),td:nth-child(4){{display:none}}footer{
 <p>La position est envoyee uniquement a Gas Quebec pour la recherche. Une copie .env est conservee dans le volume GasWatch.</p></section>
 {"".join(sections)}
 <footer><span>* Distance geographique, pas routiere.</span><span>Page generee {generated}</span></footer>
-</main></body></html>"""
+</main><script>
+for (const detail of document.querySelectorAll('[data-station]')) {{
+  if (location.hash === `#${{detail.id}}`) detail.open = true;
+  detail.addEventListener('toggle', () => {{
+    if (detail.open) history.replaceState(null, '', `#${{detail.id}}`);
+  }});
+}}
+</script></body></html>"""
 
 
 class DashboardServer:
@@ -219,6 +282,9 @@ class DashboardServer:
                                 outer.settings.max_price_age_minutes
                             ),
                             "history": outer.repository.dashboard_history(
+                                outer.settings.history_days
+                            ),
+                            "station_history": outer.repository.dashboard_station_history(
                                 outer.settings.history_days
                             ),
                         },

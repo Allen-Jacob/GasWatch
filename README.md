@@ -79,7 +79,9 @@ Toutes les options sont documentees dans `.env.example`. Les groupes principaux 
 ## Tableau de bord et historique des stations
 
 La page `/` lit directement SQLite et affiche le dernier prix conserve pour chaque station proche,
-la moyenne locale, la distance geographique, l'age du releve et la courbe des minimums quotidiens.
+la moyenne locale, la distance geographique, l'age du releve et la courbe de la moyenne quotidienne
+des stations suivies. Chaque station est cliquable et revele son propre historique de prix sur
+30 jours, avec son minimum, son maximum et sa variation.
 `/api/dashboard` fournit les memes donnees en JSON et `/health` sert au healthcheck Docker.
 
 La base conserve les stations et les observations dans `stations` et `price_observations`. Pour

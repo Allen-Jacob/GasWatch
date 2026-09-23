@@ -25,6 +25,7 @@ def test_repository_persists_observation_and_backup(tmp_path) -> None:
     assert repository.daily_minimums("HOME", FuelType.REGULAR, 30) == [155.9]
     assert repository.dashboard_snapshot()[0]["name"] == "Station"
     assert repository.dashboard_history(30)[0]["station_count"] == 1
+    assert repository.dashboard_station_history(30)[0]["price_cents"] == 155.9
     backup = tmp_path / "backup.db"
     repository.backup(backup)
     assert backup.exists()

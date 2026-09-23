@@ -308,6 +308,34 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def dashboard_station_history(self, days: int = 30) -> list[dict[str, Any]]:
+        """Return the last observed price per station and day for dashboard charts."""
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                WITH daily AS (
+                    SELECT o.location_key, o.fuel_type, o.station_id, s.name, s.address,
+                           date(o.fetched_at) AS day, o.price_cents,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY o.location_key, o.fuel_type, o.station_id,
+                                            date(o.fetched_at)
+                               ORDER BY o.fetched_at DESC
+                           ) AS position
+                    FROM price_observations o
+                    JOIN stations s
+                      ON s.provider=o.provider AND s.station_id=o.station_id
+                    WHERE o.fetched_at>=?
+                )
+                SELECT location_key, fuel_type, station_id, name, address, day, price_cents
+                FROM daily
+                WHERE position=1
+                ORDER BY location_key, fuel_type, name, station_id, day
+                """,
+                (since,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def backup(self, destination: Path | str) -> None:
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
