@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from email.header import Header
+from urllib.parse import quote
+
 import httpx
 
 
@@ -18,12 +21,12 @@ class NtfyNotifier:
     async def send(self, title: str, message: str, priority: str = "default") -> None:
         try:
             response = await self._client.post(
-                "/",
-                json={
-                    "topic": self._topic,
-                    "title": title,
-                    "message": message,
-                    "priority": priority,
+                f"/{quote(self._topic, safe='')}",
+                content=message.encode("utf-8"),
+                headers={
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Title": Header(title, "utf-8").encode(),
+                    "Priority": priority,
                 },
             )
             response.raise_for_status()
