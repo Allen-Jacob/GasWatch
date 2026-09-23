@@ -1,0 +1,25 @@
+services:
+  gaswatch:
+    image: ghcr.io/allen-jacob/gaswatch:latest
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-America/Toronto}
+      DATABASE_PATH: /app/data/gaswatch.db
+    volumes:
+      - gaswatch-data:/app/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  gaswatch-data:
+
