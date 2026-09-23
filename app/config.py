@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     ntfy_topic: str = ""
     ntfy_token: str = ""
 
+    web_enabled: bool = True
+    web_host: str = "0.0.0.0"
+    web_port: int = Field(default=8080, ge=1, le=65535)
+    runtime_env_path: Path = Path("/app/data/.env")
+
     @field_validator("target_price_mode")
     @classmethod
     def valid_target_mode(cls, value: str) -> str:

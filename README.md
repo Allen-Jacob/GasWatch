@@ -1,8 +1,8 @@
 # GasWatch
 
 GasWatch est un service Python autogeberge qui collecte les prix recents de carburant autour
-d'un ou plusieurs points au Quebec, conserve un historique SQLite et envoie des rapports et
-alertes sur ntfy. Il n'expose aucun port reseau.
+d'un ou plusieurs points au Quebec, conserve un historique SQLite, affiche un tableau de bord
+Web et envoie des rapports et alertes sur ntfy.
 
 > Etat du projet: fondation fonctionnelle (v0.1). Le connecteur, l'historique, les
 > recommandations, ntfy, Docker et la CI sont presents. Certaines fonctions avancees du cahier
@@ -29,6 +29,7 @@ aucune extraction massive.
 - Minimum, moyenne, mediane, maximum et cible par percentile des minimums quotidiens.
 - Recommandation deterministe, avec priorite a l'autonomie lorsqu'un niveau est configure.
 - Rapport quotidien et alertes ntfy avec anti-doublon persistant.
+- Tableau de bord Web adaptatif, sans framework JavaScript ni conteneur supplementaire.
 - Ordonnancement adapte au fuseau horaire, sans chevauchement des taches.
 - Conteneur non privilegie, healthcheck, Compose et publication GHCR multi-architecture.
 
@@ -42,7 +43,10 @@ docker compose up -d
 docker compose logs -f gaswatch
 ```
 
-Le volume nomme `gaswatch-data` conserve `/app/data/gaswatch.db`. Aucun port n'est expose.
+Le volume nomme `gaswatch-data` conserve `/app/data/gaswatch.db`. Le tableau de bord est accessible
+sur `http://127.0.0.1:8080` depuis le serveur. Cette liaison locale evite de publier une interface
+sans authentification sur Internet. Pour un acces distant, utilisez un VPN ou un reverse proxy
+HTTPS avec authentification.
 Pour construire la branche locale au lieu de tirer GHCR, executez
 `docker build -t gaswatch:local .` puis adaptez temporairement `image` dans Compose.
 
@@ -68,6 +72,24 @@ Toutes les options sont documentees dans `.env.example`. Les groupes principaux 
 | `DAILY_REPORT_TIME` | `07:00` | Heure locale au format `HH:MM` |
 | `NTFY_ENABLED` | `false` | Active les notifications |
 | `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` | — | Serveur, sujet et jeton facultatif |
+| `WEB_ENABLED` | `true` | Active le tableau de bord et son API JSON |
+| `WEB_PORT` | `8080` | Port interne et port local Compose |
+| `WEB_BIND_ADDRESS` | `127.0.0.1` | Adresse d'exposition sur l'hote |
+
+## Tableau de bord et historique des stations
+
+La page `/` lit directement SQLite et affiche le dernier prix conserve pour chaque station proche,
+la moyenne locale, la distance geographique, l'age du releve et la courbe des minimums quotidiens.
+`/api/dashboard` fournit les memes donnees en JSON et `/health` sert au healthcheck Docker.
+
+La base conserve les stations et les observations dans `stations` et `price_observations`. Pour
+limiter sa croissance, un prix identique n'est enregistre qu'une fois par station et par jour;
+un changement de prix est toujours journalise. L'heure UTC de recuperation, la zone, le carburant,
+la distance et l'attribution de la source sont conserves. Le volume Docker rend cet historique
+persistant apres les redemarrages et mises a jour.
+
+GasWatch demande au plus dix stations par zone et par carburant, conformement aux conditions
+d'usage ponctuel de Gas Quebec. Il ne tente pas de reconstituer le jeu de donnees provincial.
 
 ### Plusieurs vehicules
 
@@ -171,4 +193,3 @@ docker compose up -d
 ```
 
 Conservez une sauvegarde SQLite avant une mise a jour majeure.
-

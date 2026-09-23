@@ -29,3 +29,4 @@ async def test_provider_parses_documented_nearby_response(respx_mock) -> None:
         await provider.close()
     assert prices[0].price_cents == 159.9
     assert prices[0].source == "Regie essence Quebec (La Regie), presente par Gas Quebec"
+    assert respx_mock.calls[0].request.url.params["limit"] == "10"

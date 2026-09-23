@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from app.domain import FuelType, StationPrice
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Repository:
@@ -77,6 +79,11 @@ class Repository:
                     price_cents REAL,
                     sent_at TEXT NOT NULL,
                     status TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS runtime_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -216,6 +223,90 @@ class Repository:
                 return db.execute("SELECT 1").fetchone()[0] == 1
         except sqlite3.Error:
             return False
+
+    def runtime_settings(self) -> dict[str, str]:
+        with self.connect() as db:
+            rows = db.execute("SELECT key, value FROM runtime_settings ORDER BY key").fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def save_runtime_settings(self, values: dict[str, str], env_path: Path | str) -> None:
+        allowed = {
+            "HOME_LATITUDE",
+            "HOME_LONGITUDE",
+            "SEARCH_RADIUS_KM",
+            "FAVORITE_STATION_IDS",
+        }
+        if set(values) - allowed:
+            raise ValueError("Reglage non autorise")
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as db:
+            for key, value in values.items():
+                db.execute(
+                    """
+                    INSERT INTO runtime_settings(key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                                   updated_at=excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+        current = self.runtime_settings()
+        destination = Path(env_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(
+            "# Genere par l'interface GasWatch\n"
+            + "".join(f"{key}={current[key]}\n" for key in sorted(current)),
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+
+    def dashboard_snapshot(self, max_age_minutes: int | None = None) -> list[dict[str, Any]]:
+        """Return the latest stored observation for each station/location/fuel."""
+        cutoff = (
+            (datetime.now(UTC) - timedelta(minutes=max_age_minutes)).isoformat()
+            if max_age_minutes is not None
+            else "0001-01-01T00:00:00+00:00"
+        )
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                WITH ranked AS (
+                    SELECT o.*, s.name, s.brand, s.address,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY o.location_key, o.fuel_type, o.station_id
+                               ORDER BY o.fetched_at DESC
+                           ) AS position
+                    FROM price_observations o
+                    JOIN stations s
+                      ON s.provider=o.provider AND s.station_id=o.station_id
+                )
+                SELECT location_key, fuel_type, station_id, name, brand, address,
+                       price_cents, distance_km, fetched_at, source
+                FROM ranked
+                WHERE position=1 AND fetched_at>=?
+                ORDER BY location_key, fuel_type, price_cents, distance_km
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def dashboard_history(self, days: int = 30) -> list[dict[str, Any]]:
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT location_key, fuel_type, date(fetched_at) AS day,
+                       MIN(price_cents) AS minimum,
+                       AVG(price_cents) AS average,
+                       COUNT(DISTINCT station_id) AS station_count
+                FROM price_observations
+                WHERE fetched_at>=?
+                GROUP BY location_key, fuel_type, date(fetched_at)
+                ORDER BY day
+                """,
+                (since,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def backup(self, destination: Path | str) -> None:
         destination = Path(destination)

@@ -8,6 +8,8 @@ services:
       DATABASE_PATH: /app/data/gaswatch.db
     volumes:
       - gaswatch-data:/app/data
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:${WEB_PORT:-8080}"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -22,4 +24,3 @@ services:
 
 volumes:
   gaswatch-data:
-

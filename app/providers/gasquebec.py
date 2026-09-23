@@ -33,7 +33,7 @@ class GasQuebecProvider(FuelPriceProvider):
                     "lng": longitude,
                     "radius": radius_km,
                     "fuelType": fuel_type.provider_value,
-                    "limit": 500,
+                    "limit": 10,
                     "sort": "price",
                 },
             )

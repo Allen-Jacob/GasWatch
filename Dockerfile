@@ -22,8 +22,8 @@ COPY healthcheck.py ./healthcheck.py
 RUN mkdir -p /app/data && chown -R gaswatch:gaswatch /app
 USER gaswatch
 VOLUME ["/app/data"]
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "/app/healthcheck.py"]
 STOPSIGNAL SIGTERM
 CMD ["gaswatch"]
-

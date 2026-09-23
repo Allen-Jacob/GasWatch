@@ -32,7 +32,7 @@ class GasWatchService:
 
     async def collect(self) -> None:
         fuels = {vehicle.fuel_type for vehicle in self.settings.configured_vehicles}
-        for location in self.settings.configured_locations:
+        for location in self._locations():
             for fuel_type in fuels:
                 try:
                     prices = await self.provider.get_stations(
@@ -44,7 +44,7 @@ class GasWatchService:
                     selected = filter_and_rank(
                         prices,
                         self.settings.preferred_brands,
-                        self.settings.favorite_ids,
+                        self._favorite_ids(),
                         self.settings.preferred_only,
                         self.settings.preferred_price_tolerance_cents,
                     )
@@ -77,6 +77,26 @@ class GasWatchService:
             for vehicle in self.settings.configured_vehicles
             if vehicle.fuel_type == fuel_type
         ]
+
+    def _locations(self) -> tuple[Location, ...]:
+        runtime = self.repository.runtime_settings()
+        configured = list(self.settings.configured_locations)
+        if not runtime or not configured:
+            return tuple(configured)
+        primary = configured[0]
+        configured[0] = Location(
+            key=primary.key,
+            name=primary.name,
+            latitude=float(runtime.get("HOME_LATITUDE", primary.latitude)),
+            longitude=float(runtime.get("HOME_LONGITUDE", primary.longitude)),
+            radius_km=float(runtime.get("SEARCH_RADIUS_KM", primary.radius_km)),
+        )
+        return tuple(configured)
+
+    def _favorite_ids(self) -> frozenset[str]:
+        runtime = self.repository.runtime_settings().get("FAVORITE_STATION_IDS", "")
+        saved = {item.strip() for item in runtime.split(",") if item.strip()}
+        return self.settings.favorite_ids | frozenset(saved)
 
     def _fresh(self, prices: list[StationPrice]) -> list[StationPrice]:
         cutoff = datetime.now(UTC) - timedelta(minutes=self.settings.max_price_age_minutes)
@@ -127,7 +147,7 @@ class GasWatchService:
 
     async def send_daily_reports(self) -> None:
         today = datetime.now(UTC).date()
-        for location in self.settings.configured_locations:
+        for location in self._locations():
             for fuel_type in {vehicle.fuel_type for vehicle in self.settings.configured_vehicles}:
                 if self.repository.report_exists(today, location.key, fuel_type):
                     continue

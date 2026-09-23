@@ -13,6 +13,7 @@ from app.notifications.base import DisabledNotifier
 from app.notifications.ntfy import NtfyNotifier
 from app.providers import GasQuebecProvider
 from app.service import GasWatchService
+from app.web import DashboardServer
 
 
 async def run() -> None:
@@ -35,6 +36,7 @@ async def run() -> None:
         else DisabledNotifier()
     )
     service = GasWatchService(settings, repository, provider, notifier)
+    web_server = DashboardServer(repository, settings) if settings.web_enabled else None
     scheduler = AsyncIOScheduler(timezone=settings.tz)
     scheduler.add_job(
         service.collect,
@@ -59,10 +61,14 @@ async def run() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     scheduler.start()
+    if web_server:
+        web_server.start()
     try:
         await service.collect()
         await stop.wait()
     finally:
+        if web_server:
+            web_server.close()
         scheduler.shutdown(wait=False)
         await service.close()
 
