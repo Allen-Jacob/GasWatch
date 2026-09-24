@@ -119,7 +119,7 @@ class Repository:
                 )
                 previous = db.execute(
                     """
-                    SELECT price_cents, date(fetched_at) AS observed_date
+                    SELECT id, price_cents, date(fetched_at) AS observed_date
                     FROM price_observations
                     WHERE provider=? AND station_id=? AND location_key=? AND fuel_type=?
                     ORDER BY fetched_at DESC LIMIT 1
@@ -132,6 +132,24 @@ class Repository:
                     and float(previous["price_cents"]) == price.price_cents
                     and previous["observed_date"] == observation_date
                 ):
+                    # Keep one historical point per unchanged price/day, while
+                    # still recording that the station was seen in this poll.
+                    # Otherwise the dashboard's freshness filter makes stable
+                    # prices disappear after MAX_PRICE_AGE_MINUTES.
+                    db.execute(
+                        """
+                        UPDATE price_observations
+                        SET distance_km=?, published_at=?, fetched_at=?, source=?
+                        WHERE id=?
+                        """,
+                        (
+                            price.distance_km,
+                            price.published_at.isoformat() if price.published_at else None,
+                            price.fetched_at.isoformat(),
+                            price.source,
+                            previous["id"],
+                        ),
+                    )
                     continue
                 cursor = db.execute(
                     """

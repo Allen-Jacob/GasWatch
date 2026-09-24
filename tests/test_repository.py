@@ -32,6 +32,46 @@ def test_repository_persists_observation_and_backup(tmp_path) -> None:
     assert Repository(backup).healthy()
 
 
+def test_unchanged_price_refreshes_latest_observation_without_duplicate(tmp_path) -> None:
+    repository = Repository(tmp_path / "gaswatch.db")
+    repository.initialize()
+    morning = datetime(2026, 9, 24, 12, tzinfo=UTC)
+    evening = datetime(2026, 9, 24, 22, tzinfo=UTC)
+    original = StationPrice(
+        "id-1",
+        "Costco",
+        "Costco",
+        "Adresse",
+        46.8,
+        -71.2,
+        4.2,
+        FuelType.REGULAR,
+        145.9,
+        morning,
+    )
+    refreshed = StationPrice(
+        "id-1",
+        "Costco",
+        "Costco",
+        "Adresse",
+        46.8,
+        -71.2,
+        4.0,
+        FuelType.REGULAR,
+        145.9,
+        evening,
+    )
+
+    assert repository.save_observations("HOME", [original]) == 1
+    assert repository.save_observations("HOME", [refreshed]) == 0
+
+    rows = repository.dashboard_snapshot()
+    assert len(rows) == 1
+    assert rows[0]["fetched_at"] == evening.isoformat()
+    assert rows[0]["distance_km"] == 4.0
+    assert len(repository.dashboard_station_history(30)) == 1
+
+
 def test_runtime_settings_are_persisted_and_exported(tmp_path) -> None:
     repository = Repository(tmp_path / "gaswatch.db")
     repository.initialize()

@@ -33,7 +33,10 @@ class GasQuebecProvider(FuelPriceProvider):
                     "lng": longitude,
                     "radius": radius_km,
                     "fuelType": fuel_type.provider_value,
-                    "limit": 10,
+                    # The REST endpoint accepts up to 500 results.  Asking for the
+                    # full local set keeps the dashboard from silently hiding a
+                    # station merely because it is not among the ten cheapest.
+                    "limit": 500,
                     "sort": "price",
                 },
             )
