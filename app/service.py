@@ -41,6 +41,8 @@ class GasWatchService:
                         location.radius_km,
                         fuel_type,
                     )
+                    excluded_ids = self._excluded_ids()
+                    prices = [price for price in prices if price.station_id not in excluded_ids]
                     selected = filter_and_rank(
                         prices,
                         self.settings.preferred_brands,
@@ -99,6 +101,10 @@ class GasWatchService:
         runtime = self.repository.runtime_settings().get("FAVORITE_STATION_IDS", "")
         saved = {item.strip() for item in runtime.split(",") if item.strip()}
         return self.settings.favorite_ids | frozenset(saved)
+
+    def _excluded_ids(self) -> frozenset[str]:
+        runtime = self.repository.runtime_settings().get("EXCLUDED_STATION_IDS", "")
+        return frozenset(item.strip() for item in runtime.split(",") if item.strip())
 
     def _fresh(self, prices: list[StationPrice]) -> list[StationPrice]:
         cutoff = datetime.now(UTC) - timedelta(minutes=self.settings.max_price_age_minutes)
