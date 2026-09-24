@@ -253,6 +253,7 @@ class Repository:
             "HOME_LONGITUDE",
             "SEARCH_RADIUS_KM",
             "FAVORITE_STATION_IDS",
+            "EXCLUDED_STATION_IDS",
         }
         if set(values) - allowed:
             raise ValueError("Reglage non autorise")

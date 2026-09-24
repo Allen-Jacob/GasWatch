@@ -21,6 +21,33 @@ from app.services.recommendations import recommend
 logger = logging.getLogger(__name__)
 
 
+def _station_ids(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _updated_station_preferences(
+    runtime: dict[str, str], station_id: str, action: str
+) -> dict[str, str]:
+    favorites = _station_ids(runtime.get("FAVORITE_STATION_IDS", ""))
+    excluded = _station_ids(runtime.get("EXCLUDED_STATION_IDS", ""))
+    if action == "favorite":
+        favorites.add(station_id)
+        excluded.discard(station_id)
+    elif action == "unfavorite":
+        favorites.discard(station_id)
+    elif action == "exclude":
+        excluded.add(station_id)
+        favorites.discard(station_id)
+    elif action == "include":
+        excluded.discard(station_id)
+    else:
+        raise ValueError("Action de station invalide")
+    return {
+        "FAVORITE_STATION_IDS": ",".join(sorted(favorites)),
+        "EXCLUDED_STATION_IDS": ",".join(sorted(excluded)),
+    }
+
+
 def _age_label(timestamp: str) -> tuple[str, str]:
     observed = datetime.fromisoformat(timestamp)
     if observed.tzinfo is None:
@@ -155,7 +182,15 @@ def _recommendation_banner(
 
 
 def render_dashboard(repository: Repository, settings: Settings) -> str:
-    snapshot = repository.dashboard_snapshot(settings.max_price_age_minutes)
+    runtime = repository.runtime_settings()
+    favorite_ids = _station_ids(runtime.get("FAVORITE_STATION_IDS", ""))
+    excluded_ids = _station_ids(runtime.get("EXCLUDED_STATION_IDS", ""))
+    all_snapshot = repository.dashboard_snapshot()
+    snapshot = [
+        row
+        for row in repository.dashboard_snapshot(settings.max_price_age_minutes)
+        if str(row["station_id"]) not in excluded_ids
+    ]
     history = repository.dashboard_history(settings.history_days)
     station_history = repository.dashboard_station_history(settings.history_days)
     grouped_history: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
@@ -171,18 +206,28 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
     for row in snapshot:
         groups[(row["location_key"], row["fuel_type"])].append(row)
 
-    runtime = repository.runtime_settings()
     primary_location = settings.configured_locations[0]
     latitude = runtime.get("HOME_LATITUDE", str(primary_location.latitude))
     longitude = runtime.get("HOME_LONGITUDE", str(primary_location.longitude))
     radius = runtime.get("SEARCH_RADIUS_KM", str(primary_location.radius_km))
-    favorite_id = runtime.get("FAVORITE_STATION_IDS", "")
     location_names = {location.key: location.name for location in settings.configured_locations}
-    station_options = "".join(
-        f'<option value="{html.escape(str(row["station_id"]))}" '
-        f"{'selected' if str(row['station_id']) == favorite_id else ''}>"
-        f"{html.escape(str(row['name']))} — {float(row['price_cents']):.1f} c/L</option>"
-        for row in snapshot
+    excluded_by_id = {
+        str(row["station_id"]): row
+        for row in all_snapshot
+        if str(row["station_id"]) in excluded_ids
+    }
+    excluded_controls = "".join(
+        f"""
+        <form method="post" action="/station-preference" class="excluded-station">
+          <input type="hidden" name="csrf" value="{{csrf_token}}">
+          <input type="hidden" name="station_id" value="{html.escape(station_id)}">
+          <input type="hidden" name="action" value="include">
+          <span><strong>{html.escape(str(row["name"]))}</strong>
+            <small>{html.escape(str(row["address"]))}</small></span>
+          <button type="submit">Reafficher</button>
+        </form>
+        """
+        for station_id, row in excluded_by_id.items()
     )
 
     def metric(value: float | None, suffix: str = " c/L") -> str:
@@ -194,9 +239,10 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         best = stations[0]
         average = sum(float(item["price_cents"]) for item in stations) / len(stations)
         age, freshness = _age_label(str(best["fetched_at"]))
-        station_cards: list[str] = []
+        station_cards: list[tuple[bool, str]] = []
         for item in stations:
             station_id = str(item["station_id"])
+            is_favorite = station_id in favorite_ids
             station_history_rows = grouped_station_history[(location_key, fuel_type, station_id)]
             station_points = [float(point["price_cents"]) for point in station_history_rows]
             station_days = [str(point["day"]) for point in station_history_rows]
@@ -209,15 +255,32 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                 character if character.isalnum() else "-"
                 for character in f"{location_key}-{fuel_type}-{station_id}"
             )
+            favorite_action = "unfavorite" if is_favorite else "favorite"
+            favorite_label = "Retirer des favoris" if is_favorite else "Ajouter aux favoris"
             station_cards.append(
-                f"""
-                <details class="station-card" id="{html.escape(station_key)}" data-station>
+                (
+                    is_favorite,
+                    f"""
+                <form method="post" action="/station-preference" class="station-card-form">
+                  <input type="hidden" name="csrf" value="{{csrf_token}}">
+                  <input type="hidden" name="station_id" value="{html.escape(station_id)}">
+                  <input type="hidden" name="return_hash" value="{html.escape(station_key)}">
+                  <details class="station-card {"is-favorite" if is_favorite else ""}" id="{html.escape(station_key)}" data-station>
                   <summary>
                     <span class="station-name"><strong>{html.escape(str(item["name"]))}</strong>
                       <small>{html.escape(str(item["address"]))}</small></span>
                     <span class="station-price">{float(item["price_cents"]):.1f}<small> c/L</small></span>
                     <span>{float(item["distance_km"]):.1f} km</span>
                     <span>{html.escape(_age_label(str(item["fetched_at"]))[0])}</span>
+                    <span class="station-actions">
+                      <button type="submit" class="icon-button favorite-button {"active" if is_favorite else ""}"
+                        name="action" value="{favorite_action}"
+                        aria-label="{favorite_label}: {html.escape(str(item["name"]))}, {html.escape(str(item["address"]))}"
+                        title="{favorite_label}">{"★" if is_favorite else "☆"}</button>
+                      <button type="submit" class="icon-button exclude-button" name="action" value="exclude"
+                        aria-label="Exclure: {html.escape(str(item["name"]))}, {html.escape(str(item["address"]))}"
+                        title="Ne plus afficher cette station">×</button>
+                    </span>
                   </summary>
                   <div class="station-detail">
                     <div><p class="eyebrow">Historique de cette station</p>
@@ -230,10 +293,30 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                       <div><span>Jours suivis</span><strong>{len(station_points)}</strong></div>
                     </div>
                   </div>
-                </details>
-                """
+                  </details>
+                </form>
+                """,
+                )
             )
-        station_list = "".join(station_cards)
+        favorite_cards = [card for is_favorite, card in station_cards if is_favorite]
+        other_cards = [card for is_favorite, card in station_cards if not is_favorite]
+        if favorite_cards:
+            visible_cards = favorite_cards
+            hidden_cards = other_cards
+        else:
+            visible_cards = other_cards[:8]
+            hidden_cards = other_cards[8:]
+        more_stations = (
+            f"""
+            <details class="more-stations">
+              <summary>Voir les {len(hidden_cards)} autres stations</summary>
+              <div>{"".join(hidden_cards)}</div>
+            </details>
+            """
+            if hidden_cards
+            else ""
+        )
+        station_list = "".join(visible_cards) + more_stations
         market_history = grouped_history[(location_key, fuel_type)]
         averages = [float(item["average"]) for item in market_history]
         market_days = [str(item["day"]) for item in market_history]
@@ -343,50 +426,60 @@ article strong{{display:block;font-size:2.3rem;margin-top:12px;letter-spacing:-.
 border-radius:8px;background:var(--soft);color:#171512;font-size:.78rem;font-weight:800;box-shadow:0 8px 30px #0009;transition:opacity .12s ease;white-space:nowrap}}
 #chart-tooltip.visible{{opacity:1}}
 .settings{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;margin-bottom:24px}}
-.settings h2{{margin-bottom:14px}}form{{display:grid;grid-template-columns:1fr 1fr .7fr 1.5fr auto;gap:12px;align-items:end}}
+.settings h2{{margin-bottom:14px}}.settings-form{{display:grid;grid-template-columns:1fr 1fr .7fr auto;gap:12px;align-items:end}}
 label{{display:grid;gap:6px;color:var(--muted);font-size:.8rem}}input,select,button{{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}}
 input,select{{background:#10100f;color:var(--ink);min-width:0}}button{{background:var(--accent);color:#171512;font-weight:800;cursor:pointer}}
 button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:.8rem;margin:12px 0 0}}
+.excluded-list{{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}}.excluded-list h3{{font-size:.9rem;margin:0 0 10px}}
+.excluded-station{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #292824}}
+.excluded-station:first-of-type{{border-top:0}}.excluded-station span{{min-width:0}}.excluded-station strong,.excluded-station small{{display:block}}
+.excluded-station small{{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.excluded-station button{{padding:7px 10px;background:transparent;color:var(--accent)}}
 .notice{{background:var(--panel2);color:var(--soft);border:1px solid var(--accent);padding:10px 14px;border-radius:9px;margin-bottom:14px}}
 .history-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}}.history-stats div{{background:#111110;padding:8px;border-radius:8px}}
 .history-stats span{{display:block;color:var(--muted);font-size:.65rem;text-transform:uppercase}}.history-stats strong{{font-size:.9rem;margin:2px 0 0;letter-spacing:0}}
-.station-list-head,.station-card summary{{display:grid;grid-template-columns:minmax(260px,1fr) 130px 120px 130px;align-items:center;gap:16px;padding:13px 26px}}
+.station-list-head,.station-card summary{{display:grid;grid-template-columns:minmax(240px,1fr) 120px 100px 115px 82px 18px;align-items:center;gap:14px;padding:13px 18px 13px 26px}}
 .station-list-head{{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--line)}}
-.station-card{{border-bottom:1px solid var(--line)}}.station-card:last-child{{border-bottom:0}}
+.station-card-form{{display:block}}.station-card{{border-bottom:1px solid var(--line)}}.station-card:last-child{{border-bottom:0}}
+.station-card.is-favorite{{box-shadow:inset 3px 0 var(--accent)}}
 .station-card summary{{cursor:pointer;list-style:none;transition:background .18s ease}}.station-card summary::-webkit-details-marker{{display:none}}
 .station-card summary:hover,.station-card[open] summary{{background:var(--panel2)}}
-.station-card summary::after{{content:'+';color:var(--accent);font-size:1.25rem;position:absolute;right:10px}}
-.station-card[open] summary::after{{content:'−'}}.station-card summary{{position:relative}}
+.station-card summary::after{{content:'+';color:var(--accent);font-size:1.25rem;text-align:center}}
+.station-card[open] summary::after{{content:'−'}}
 .station-card summary>span{{color:var(--muted);font-size:.88rem}}.station-name strong{{display:block;color:var(--ink);font-size:1rem}}
 .station-name small{{display:block;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .station-price{{color:var(--accent)!important;font-size:1.2rem!important;font-weight:800}}.station-price small{{font-size:.75rem}}
+.station-actions{{display:flex;gap:5px}}.icon-button{{display:grid;place-items:center;width:36px;height:34px;padding:0;background:transparent;color:var(--muted);font-size:1.15rem}}
+.icon-button:hover,.icon-button:focus{{background:var(--panel);color:var(--accent)}}.favorite-button.active{{color:var(--accent);background:#2a2518}}
+.exclude-button:hover,.exclude-button:focus{{color:var(--red);border-color:var(--red)}}
 .station-detail{{display:grid;grid-template-columns:1fr 2fr;gap:16px 28px;padding:20px 26px 26px;background:#111110;border-top:1px solid var(--line)}}
 .station-detail .chart{{height:118px;margin:0}}.station-stats{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}
 .station-stats div{{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel)}}
 .station-stats span{{display:block;color:var(--muted);font-size:.68rem;text-transform:uppercase}}.station-stats strong{{font-size:1rem}}
+.more-stations>summary{{cursor:pointer;list-style:none;text-align:center;padding:15px;color:var(--accent);font-weight:800;background:#121210}}
+.more-stations>summary::-webkit-details-marker{{display:none}}.more-stations>summary::after{{content:' ↓'}}.more-stations[open]>summary::after{{content:' ↑'}}
 .empty{{text-align:center;padding:80px 24px;background:var(--panel);border:1px solid var(--line);border-radius:18px}}
 .pump{{font-size:3rem}}footer{{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:.8rem;margin-top:24px}}
 @media(max-width:760px){{.shell{{width:min(100% - 20px,1180px);padding-top:22px}}header{{align-items:start}}header>p{{text-align:right;max-width:160px}}
 .buy-advice{{grid-template-columns:auto 1fr;padding:18px}}.advice-badge{{grid-column:1/-1;width:max-content}}
 .advice-metrics{{grid-template-columns:1fr 1fr;gap:14px 0}}.advice-metrics div:nth-child(2){{border:0}}.advice-metrics div:nth-child(3){{padding-left:0}}
-.settings{{padding:18px}}form{{grid-template-columns:1fr 1fr}}form label:nth-child(4),form button{{grid-column:1/-1}}
+.settings{{padding:18px}}.settings-form{{grid-template-columns:1fr 1fr}}.settings-form button{{grid-column:1/-1}}
 .summary-grid{{grid-template-columns:1fr 1fr}}article{{padding:18px;min-height:130px}}article.trend{{grid-column:1/-1;border-top:1px solid var(--line)}}
-.station-list-head{{display:none}}.station-card summary{{grid-template-columns:1fr auto;padding:15px 18px 15px 18px}}
-.station-card summary>span:nth-child(3),.station-card summary>span:nth-child(4){{display:none}}.station-card summary::after{{right:8px}}
-.station-price{{padding-right:22px}}.station-detail{{grid-template-columns:1fr;padding:18px}}.station-stats{{grid-template-columns:1fr 1fr}}
+.station-list-head{{display:none}}.station-card summary{{grid-template-columns:minmax(0,1fr) auto auto 16px;padding:13px 12px 13px 18px;gap:8px}}
+.station-card summary>span:nth-child(3),.station-card summary>span:nth-child(4){{display:none}}
+.station-price{{padding-right:3px}}.station-actions{{gap:3px}}.icon-button{{width:32px;height:32px}}.station-detail{{grid-template-columns:1fr;padding:18px}}.station-stats{{grid-template-columns:1fr 1fr}}
 footer{{display:block}}}}
 </style></head><body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
 <p>Prix recents autour de vos emplacements</p></div><p>Actualisation automatique<br>toutes les 60 secondes</p></header>
 {"".join(advice_banners)}
 <section class="settings"><h2>Mes reglages</h2>
-<form method="post" action="/settings">
+<form method="post" action="/settings" class="settings-form">
 <input type="hidden" name="csrf" value="{{csrf_token}}">
 <label>Latitude<input name="latitude" inputmode="decimal" required value="{html.escape(latitude)}"></label>
 <label>Longitude<input name="longitude" inputmode="decimal" required value="{html.escape(longitude)}"></label>
 <label>Rayon (km)<input name="radius" inputmode="decimal" required value="{html.escape(radius)}"></label>
-<label>Station favorite<select name="favorite_station_id"><option value="">Aucune</option>{station_options}</select></label>
 <button type="submit">Enregistrer</button></form>
-<p>La position est envoyee uniquement a Gas Quebec pour la recherche. Une copie .env est conservee dans le volume GasWatch.</p></section>
+<p>Utilisez l'etoile a cote d'une station pour la garder en haut. La position est envoyee uniquement a Gas Quebec pour la recherche.</p>
+{f'<div class="excluded-list"><h3>Stations exclues</h3>{excluded_controls}</div>' if excluded_controls else ""}</section>
 {"".join(sections)}
 <footer><span>* Distance geographique, pas routiere.</span><span>Page generee {generated}</span></footer>
 </main><div id="chart-tooltip" role="tooltip"></div><script>
@@ -395,6 +488,9 @@ for (const detail of document.querySelectorAll('[data-station]')) {{
   detail.addEventListener('toggle', () => {{
     if (detail.open) history.replaceState(null, '', `#${{detail.id}}`);
   }});
+}}
+for (const button of document.querySelectorAll('.station-actions button')) {{
+  button.addEventListener('click', event => event.stopPropagation());
 }}
 const chartTooltip = document.querySelector('#chart-tooltip');
 function showChartTooltip(point) {{
@@ -432,17 +528,29 @@ class DashboardServer:
                         json.dumps({"status": "ok"}).encode(),
                     )
                 elif path == "/api/dashboard":
+                    excluded = _station_ids(
+                        outer.repository.runtime_settings().get("EXCLUDED_STATION_IDS", "")
+                    )
+                    stations = [
+                        row
+                        for row in outer.repository.dashboard_snapshot(
+                            outer.settings.max_price_age_minutes
+                        )
+                        if str(row["station_id"]) not in excluded
+                    ]
                     body = json.dumps(
                         {
-                            "stations": outer.repository.dashboard_snapshot(
-                                outer.settings.max_price_age_minutes
-                            ),
+                            "stations": stations,
                             "history": outer.repository.dashboard_history(
                                 outer.settings.history_days
                             ),
-                            "station_history": outer.repository.dashboard_station_history(
-                                outer.settings.history_days
-                            ),
+                            "station_history": [
+                                row
+                                for row in outer.repository.dashboard_station_history(
+                                    outer.settings.history_days
+                                )
+                                if str(row["station_id"]) not in excluded
+                            ],
                         },
                         ensure_ascii=False,
                     ).encode()
@@ -451,11 +559,16 @@ class DashboardServer:
                     page = render_dashboard(outer.repository, outer.settings).replace(
                         "{csrf_token}", outer._csrf_token
                     )
-                    if parse_qs(urlparse(self.path).query).get("saved") == ["1"]:
+                    saved = parse_qs(urlparse(self.path).query).get("saved")
+                    if saved in (["1"], ["station"]):
+                        message = (
+                            "Preference de station sauvegardee."
+                            if saved == ["station"]
+                            else "Reglages sauvegardes. Ils seront utilises a la prochaine collecte."
+                        )
                         page = page.replace(
                             "</header>",
-                            '</header><div class="notice" role="status">Reglages sauvegardes. '
-                            "Ils seront utilises a la prochaine collecte.</div>",
+                            f'</header><div class="notice" role="status">{message}</div>',
                             1,
                         )
                     body = page.encode()
@@ -464,7 +577,8 @@ class DashboardServer:
                     self._send(HTTPStatus.NOT_FOUND, "text/plain", b"Not found")
 
             def do_POST(self) -> None:  # noqa: N802
-                if urlparse(self.path).path != "/settings":
+                path = urlparse(self.path).path
+                if path not in {"/settings", "/station-preference"}:
                     self._send(HTTPStatus.NOT_FOUND, "text/plain", b"Not found")
                     return
                 length = int(self.headers.get("Content-Length", "0"))
@@ -475,6 +589,29 @@ class DashboardServer:
                 if form.get("csrf", [""])[0] != outer._csrf_token:
                     self._send(HTTPStatus.FORBIDDEN, "text/plain", b"Invalid CSRF token")
                     return
+                if path == "/station-preference":
+                    try:
+                        station_id = form.get("station_id", [""])[0]
+                        action = form.get("action", [""])[0]
+                        valid_ids = {
+                            str(row["station_id"]) for row in outer.repository.dashboard_snapshot()
+                        }
+                        if not station_id or station_id not in valid_ids:
+                            raise ValueError("Station invalide")
+                        values = _updated_station_preferences(
+                            outer.repository.runtime_settings(), station_id, action
+                        )
+                        outer.repository.save_runtime_settings(
+                            values, outer.settings.runtime_env_path
+                        )
+                    except (TypeError, ValueError):
+                        self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"Invalid station")
+                        return
+                    self.send_response(HTTPStatus.SEE_OTHER)
+                    self.send_header("Location", "/?saved=station")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 try:
                     latitude = float(form.get("latitude", [""])[0])
                     longitude = float(form.get("longitude", [""])[0])
@@ -483,21 +620,11 @@ class DashboardServer:
                         raise ValueError("Coordonnees hors Quebec")
                     if not 1 <= radius <= 30:
                         raise ValueError("Rayon invalide")
-                    favorite = form.get("favorite_station_id", [""])[0]
-                    valid_ids = {
-                        str(row["station_id"])
-                        for row in outer.repository.dashboard_snapshot(
-                            outer.settings.max_price_age_minutes
-                        )
-                    }
-                    if favorite and favorite not in valid_ids:
-                        raise ValueError("Station favorite invalide")
                     outer.repository.save_runtime_settings(
                         {
                             "HOME_LATITUDE": str(latitude),
                             "HOME_LONGITUDE": str(longitude),
                             "SEARCH_RADIUS_KM": str(radius),
-                            "FAVORITE_STATION_IDS": favorite,
                         },
                         outer.settings.runtime_env_path,
                     )

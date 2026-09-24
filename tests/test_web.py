@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from app.config import Settings
 from app.database import Repository
 from app.domain import FuelType, StationPrice
-from app.web import render_dashboard
+from app.web import _updated_station_preferences, render_dashboard
 
 
 def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
@@ -35,7 +35,9 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "159.9" in page
     assert "stations disponibles" in page
     assert "Mes reglages" in page
-    assert "Station favorite" in page
+    assert "Ajouter aux favoris" in page
+    assert "Ne plus afficher cette station" in page
+    assert 'name="favorite_station_id"' not in page
     assert "Variation" in page
     assert "Moyenne des stations suivies" in page
     assert "Historique de cette station" in page
@@ -86,3 +88,19 @@ def test_dashboard_does_not_cap_visible_stations(tmp_path, monkeypatch) -> None:
 
     assert "15 stations disponibles" in page
     assert "Station 14" in page
+    assert "Voir les 7 autres stations" in page
+
+
+def test_station_preferences_can_favorite_exclude_and_restore() -> None:
+    runtime: dict[str, str] = {}
+
+    runtime.update(_updated_station_preferences(runtime, "station-1", "favorite"))
+    assert runtime["FAVORITE_STATION_IDS"] == "station-1"
+    assert runtime["EXCLUDED_STATION_IDS"] == ""
+
+    runtime.update(_updated_station_preferences(runtime, "station-1", "exclude"))
+    assert runtime["FAVORITE_STATION_IDS"] == ""
+    assert runtime["EXCLUDED_STATION_IDS"] == "station-1"
+
+    runtime.update(_updated_station_preferences(runtime, "station-1", "include"))
+    assert runtime["EXCLUDED_STATION_IDS"] == ""

@@ -82,8 +82,10 @@ def test_runtime_settings_are_persisted_and_exported(tmp_path) -> None:
             "HOME_LONGITUDE": "-71.2",
             "SEARCH_RADIUS_KM": "12",
             "FAVORITE_STATION_IDS": "station-1",
+            "EXCLUDED_STATION_IDS": "station-2",
         },
         env_path,
     )
     assert repository.runtime_settings()["FAVORITE_STATION_IDS"] == "station-1"
+    assert repository.runtime_settings()["EXCLUDED_STATION_IDS"] == "station-2"
     assert "HOME_LATITUDE=46.8" in env_path.read_text()
