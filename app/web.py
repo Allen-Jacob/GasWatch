@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import secrets
+import statistics
 import threading
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -13,6 +14,9 @@ from urllib.parse import parse_qs, urlparse
 
 from app.config import Settings
 from app.database import Repository
+from app.domain import PriceStats, RecommendationCode
+from app.services.analysis import percentile
+from app.services.recommendations import recommend
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +36,122 @@ def _age_label(timestamp: str) -> tuple[str, str]:
     return f"il y a {hours // 24} j", "stale"
 
 
-def _sparkline(points: list[float], label: str = "Evolution du prix") -> str:
+def _sparkline(
+    points: list[float],
+    label: str = "Evolution du prix",
+    point_labels: list[str] | None = None,
+) -> str:
     if not points:
         return '<div class="empty-chart">Historique en construction</div>'
     width, height, padding = 560, 118, 8
     low, high = min(points), max(points)
     spread = max(high - low, 1)
     coords: list[str] = []
+    markers: list[str] = []
     for index, value in enumerate(points):
         x = padding + index * (width - 2 * padding) / max(len(points) - 1, 1)
         y = height - padding - (value - low) * (height - 2 * padding) / spread
         coords.append(f"{x:.1f},{y:.1f}")
+        point_label = (
+            point_labels[index] if point_labels and index < len(point_labels) else "Releve"
+        )
+        tooltip = html.escape(f"{point_label} · {value:.1f} c/L", quote=True)
+        markers.append(
+            f'<circle class="chart-point" cx="{x:.1f}" cy="{y:.1f}" r="5" '
+            f'tabindex="0" data-tooltip="{tooltip}"><title>{tooltip}</title></circle>'
+        )
     return (
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
         f'aria-label="{html.escape(label)}"><polyline points="{" ".join(coords)}" />'
-        f'<text x="8" y="16">{high:.1f}</text><text x="8" y="110">{low:.1f}</text></svg>'
+        f'{"".join(markers)}<text x="8" y="16">{high:.1f}</text>'
+        f'<text x="8" y="110">{low:.1f}</text></svg>'
     )
+
+
+def _recommendation_banner(
+    stations: list[dict[str, object]],
+    market_history: list[dict[str, object]],
+    location_key: str,
+    fuel_type: str,
+    location_name: str,
+    settings: Settings,
+) -> str:
+    daily_minimums = [float(item["minimum"]) for item in market_history]
+    target = (
+        settings.manual_target_price_cents
+        if settings.target_price_mode == "MANUAL"
+        else percentile(daily_minimums, settings.target_price_percentile)
+        if len(daily_minimums) >= settings.minimum_history_days
+        else None
+    )
+    prices = [float(item["price_cents"]) for item in stations]
+    historical_average = statistics.fmean(daily_minimums) if daily_minimums else None
+    stats = PriceStats(
+        minimum=min(prices),
+        average=statistics.fmean(prices),
+        median=statistics.median(prices),
+        maximum=max(prices),
+        station_count=len(prices),
+        target=target,
+        historical_average=historical_average,
+    )
+    vehicle = next(
+        (
+            candidate
+            for candidate in settings.configured_vehicles
+            if candidate.fuel_type.value == fuel_type
+        ),
+        settings.configured_vehicles[0],
+    )
+    result = recommend(
+        stats,
+        vehicle,
+        minimum_history_days_met=len(daily_minimums) >= settings.minimum_history_days,
+        good_threshold=settings.good_price_threshold_cents,
+        high_threshold=settings.high_price_threshold_cents,
+        very_high_threshold=settings.very_high_price_threshold_cents,
+    )
+    presentation = {
+        RecommendationCode.FILL_NOW: (
+            "excellent",
+            "Excellent moment pour faire le plein",
+            "Faire le plein",
+        ),
+        RecommendationCode.GOOD_PRICE: ("good", "Bon moment pour acheter", "Bon prix"),
+        RecommendationCode.NORMAL_PRICE: ("normal", "Prix dans la normale", "Prix normal"),
+        RecommendationCode.WAIT: ("wait", "Attendre peut valoir la peine", "Attendre"),
+        RecommendationCode.HIGH_PRICE: ("high", "Prix eleve en ce moment", "Prix eleve"),
+        RecommendationCode.INSUFFICIENT_DATA: (
+            "learning",
+            "Analyse en cours",
+            "Donnees en apprentissage",
+        ),
+    }
+    tone, heading, badge = presentation[result.code]
+    comparison = (
+        f"{stats.minimum - historical_average:+.1f} c/L vs moyenne {settings.history_days} jours"
+        if historical_average is not None
+        else "Comparaison disponible bientot"
+    )
+    target_label = f"{target:.1f} c/L" if target is not None else "En calcul"
+    banner_id = "advice-" + "".join(
+        character if character.isalnum() else "-" for character in f"{location_key}-{fuel_type}"
+    )
+    return f"""
+    <section class="buy-advice {tone}" aria-labelledby="{html.escape(banner_id)}">
+      <div class="advice-icon" aria-hidden="true">↗</div>
+      <div class="advice-copy"><p class="eyebrow">Verdict du jour · {html.escape(location_name)}</p>
+        <h2 id="{html.escape(banner_id)}">{html.escape(heading)}</h2>
+        <p>{html.escape(result.reason)}</p></div>
+      <span class="advice-badge">{html.escape(badge)}</span>
+      <div class="advice-metrics">
+        <div><span>Meilleur prix</span><strong>{stats.minimum:.1f} c/L</strong></div>
+        <div><span>Comparaison</span><strong>{html.escape(comparison)}</strong></div>
+        <div><span>Cible personnelle</span><strong>{html.escape(target_label)}</strong></div>
+        <div><span>Historique</span><strong>{len(daily_minimums)} jour{"s" if len(daily_minimums) != 1 else ""}</strong></div>
+      </div>
+    </section>
+    """
 
 
 def render_dashboard(repository: Repository, settings: Settings) -> str:
@@ -85,17 +189,17 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         return f"{value:+.1f}{suffix}" if value is not None else "—"
 
     sections: list[str] = []
+    advice_banners: list[str] = []
     for (location_key, fuel_type), stations in groups.items():
         best = stations[0]
         average = sum(float(item["price_cents"]) for item in stations) / len(stations)
         age, freshness = _age_label(str(best["fetched_at"]))
         station_cards: list[str] = []
-        for item in stations[:12]:
+        for item in stations:
             station_id = str(item["station_id"])
-            station_points = [
-                float(point["price_cents"])
-                for point in grouped_station_history[(location_key, fuel_type, station_id)]
-            ]
+            station_history_rows = grouped_station_history[(location_key, fuel_type, station_id)]
+            station_points = [float(point["price_cents"]) for point in station_history_rows]
+            station_days = [str(point["day"]) for point in station_history_rows]
             station_min = min(station_points) if station_points else None
             station_max = max(station_points) if station_points else None
             station_change = (
@@ -118,7 +222,7 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                   <div class="station-detail">
                     <div><p class="eyebrow">Historique de cette station</p>
                       <h3>Prix sur les {settings.history_days} derniers jours</h3></div>
-                    {_sparkline(station_points, f"Prix sur {settings.history_days} jours pour {item['name']}")}
+                    {_sparkline(station_points, f"Prix sur {settings.history_days} jours pour {item['name']}", station_days)}
                     <div class="station-stats">
                       <div><span>Minimum</span><strong>{metric(station_min).lstrip("+")}</strong></div>
                       <div><span>Maximum</span><strong>{metric(station_max).lstrip("+")}</strong></div>
@@ -132,7 +236,12 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         station_list = "".join(station_cards)
         market_history = grouped_history[(location_key, fuel_type)]
         averages = [float(item["average"]) for item in market_history]
-        chart = _sparkline(averages, "Moyenne quotidienne des stations suivies")
+        market_days = [str(item["day"]) for item in market_history]
+        chart = _sparkline(
+            averages,
+            "Moyenne quotidienne des stations suivies",
+            market_days,
+        )
         history_min = min(averages) if averages else None
         history_max = max(averages) if averages else None
         history_avg = sum(averages) / len(averages) if averages else None
@@ -143,6 +252,16 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
             f"<div><span>Moyenne</span><strong>{metric(history_avg).lstrip('+')}</strong></div>"
             f"<div><span>Maximum</span><strong>{metric(history_max).lstrip('+')}</strong></div>"
             f"<div><span>Variation</span><strong>{metric(change)}</strong></div>"
+        )
+        advice_banners.append(
+            _recommendation_banner(
+                stations,
+                market_history,
+                location_key,
+                fuel_type,
+                location_names.get(location_key, location_key),
+                settings,
+            )
         )
         sections.append(
             f"""
@@ -157,7 +276,7 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                   <strong>{float(best["price_cents"]):.1f}<small> c/L</small></strong>
                   <p>{html.escape(str(best["name"]))}</p></article>
                 <article><span>Moyenne locale</span><strong>{average:.1f}<small> c/L</small></strong>
-                  <p>{len(stations)} stations conservees</p></article>
+                  <p>{len(stations)} stations disponibles</p></article>
                 <article class="trend"><span>Moyenne des stations suivies — {settings.history_days} jours</span>
                   {chart}<div class="history-stats">{stats_cards}</div></article>
               </div>
@@ -184,12 +303,27 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111110'/%3E%3Cpath d='M18 12h25v43H18z' fill='%23d7c7ad'/%3E%3Cpath d='M23 18h15v13H23z' fill='%23111110'/%3E%3Cpath d='M43 22c8 1 6 14 6 21 0 5 6 5 6 0V28' fill='none' stroke='%23d7c7ad' stroke-width='5'/%3E%3C/svg%3E">
 <style>
 :root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;
---accent:#d7c7ad;--soft:#ece6da;--dim:#7d7971;--black:#0e0e0d}}*{{box-sizing:border-box}}
+--accent:#e6c77a;--soft:#fff3d3;--dim:#7d7971;--black:#0e0e0d;--green:#71d99b;
+--amber:#f0b45f;--red:#ef7d72;--blue:#70b8d7}}*{{box-sizing:border-box}}
 body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,sans-serif}}
 .shell{{width:min(1180px,calc(100% - 32px));margin:auto;padding:34px 0 64px}}
 header{{display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px}}
 h1{{font-size:clamp(2rem,5vw,4rem);letter-spacing:-.06em;line-height:.9;margin:0}}h1 b{{color:var(--accent)}}
 header p,.meta,article p{{color:var(--muted);margin:.35rem 0 0;font-size:.875rem}}
+.buy-advice{{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px 18px;align-items:center;
+padding:22px 24px;margin-bottom:24px;border:1px solid color-mix(in srgb,var(--verdict) 52%,var(--line));
+border-radius:18px;background:linear-gradient(120deg,color-mix(in srgb,var(--verdict) 14%,var(--panel)),var(--panel) 62%);overflow:hidden}}
+.buy-advice::after{{content:'';position:absolute;width:180px;height:180px;right:-70px;top:-100px;border-radius:50%;background:var(--verdict);opacity:.09}}
+.buy-advice.excellent,.buy-advice.good{{--verdict:var(--green)}}.buy-advice.normal{{--verdict:var(--blue)}}
+.buy-advice.wait,.buy-advice.learning{{--verdict:var(--amber)}}.buy-advice.high{{--verdict:var(--red)}}
+.advice-icon{{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:var(--verdict);color:#10110f;font-size:1.4rem;font-weight:900}}
+.advice-copy h2{{font-size:1.65rem;margin:2px 0}}.advice-copy>p:last-child{{color:var(--muted);margin:4px 0 0}}
+.advice-badge{{position:relative;z-index:1;color:var(--verdict);border:1px solid color-mix(in srgb,var(--verdict) 55%,transparent);background:#111;
+padding:7px 11px;border-radius:99px;font-size:.78rem;font-weight:800}}
+.advice-metrics{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);padding-top:16px;margin-top:2px}}
+.advice-metrics div{{padding:0 16px;border-right:1px solid var(--line)}}.advice-metrics div:first-child{{padding-left:0}}.advice-metrics div:last-child{{border:0}}
+.advice-metrics span{{display:block;color:var(--muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.07em}}
+.advice-metrics strong{{display:block;font-size:.92rem;margin-top:3px}}
 .market{{background:var(--panel);border:1px solid var(--line);border-radius:18px;overflow:hidden;margin-bottom:24px}}
 .market-head{{display:flex;align-items:center;justify-content:space-between;padding:24px 26px 18px}}
 .eyebrow{{color:var(--accent);font-size:.75rem;font-weight:800;letter-spacing:.15em;margin:0;text-transform:uppercase}}
@@ -202,7 +336,12 @@ article>span{{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter
 article strong{{display:block;font-size:2.3rem;margin-top:12px;letter-spacing:-.04em}}article small{{font-size:.9rem;color:var(--muted)}}
 .hero-price{{background:var(--panel2)}}.hero-price strong{{color:var(--accent)}}.chart{{display:block;width:100%;height:90px;margin-top:8px}}
 .chart polyline{{fill:none;stroke:var(--accent);stroke-width:4;stroke-linejoin:round;stroke-linecap:round}}
+.chart-point{{fill:var(--panel);stroke:var(--accent);stroke-width:3;cursor:crosshair;transition:r .15s ease,fill .15s ease}}
+.chart-point:hover,.chart-point:focus{{r:7;fill:var(--accent);outline:none}}
 .chart text{{fill:var(--muted);font-size:12px}}.empty-chart{{color:var(--muted);padding-top:35px}}
+#chart-tooltip{{position:fixed;z-index:20;pointer-events:none;opacity:0;transform:translate(-50%,-115%);padding:7px 10px;
+border-radius:8px;background:var(--soft);color:#171512;font-size:.78rem;font-weight:800;box-shadow:0 8px 30px #0009;transition:opacity .12s ease;white-space:nowrap}}
+#chart-tooltip.visible{{opacity:1}}
 .settings{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;margin-bottom:24px}}
 .settings h2{{margin-bottom:14px}}form{{display:grid;grid-template-columns:1fr 1fr .7fr 1.5fr auto;gap:12px;align-items:end}}
 label{{display:grid;gap:6px;color:var(--muted);font-size:.8rem}}input,select,button{{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}}
@@ -228,6 +367,8 @@ button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:
 .empty{{text-align:center;padding:80px 24px;background:var(--panel);border:1px solid var(--line);border-radius:18px}}
 .pump{{font-size:3rem}}footer{{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:.8rem;margin-top:24px}}
 @media(max-width:760px){{.shell{{width:min(100% - 20px,1180px);padding-top:22px}}header{{align-items:start}}header>p{{text-align:right;max-width:160px}}
+.buy-advice{{grid-template-columns:auto 1fr;padding:18px}}.advice-badge{{grid-column:1/-1;width:max-content}}
+.advice-metrics{{grid-template-columns:1fr 1fr;gap:14px 0}}.advice-metrics div:nth-child(2){{border:0}}.advice-metrics div:nth-child(3){{padding-left:0}}
 .settings{{padding:18px}}form{{grid-template-columns:1fr 1fr}}form label:nth-child(4),form button{{grid-column:1/-1}}
 .summary-grid{{grid-template-columns:1fr 1fr}}article{{padding:18px;min-height:130px}}article.trend{{grid-column:1/-1;border-top:1px solid var(--line)}}
 .station-list-head{{display:none}}.station-card summary{{grid-template-columns:1fr auto;padding:15px 18px 15px 18px}}
@@ -236,6 +377,7 @@ button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:
 footer{{display:block}}}}
 </style></head><body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
 <p>Prix recents autour de vos emplacements</p></div><p>Actualisation automatique<br>toutes les 60 secondes</p></header>
+{"".join(advice_banners)}
 <section class="settings"><h2>Mes reglages</h2>
 <form method="post" action="/settings">
 <input type="hidden" name="csrf" value="{{csrf_token}}">
@@ -247,12 +389,26 @@ footer{{display:block}}}}
 <p>La position est envoyee uniquement a Gas Quebec pour la recherche. Une copie .env est conservee dans le volume GasWatch.</p></section>
 {"".join(sections)}
 <footer><span>* Distance geographique, pas routiere.</span><span>Page generee {generated}</span></footer>
-</main><script>
+</main><div id="chart-tooltip" role="tooltip"></div><script>
 for (const detail of document.querySelectorAll('[data-station]')) {{
   if (location.hash === `#${{detail.id}}`) detail.open = true;
   detail.addEventListener('toggle', () => {{
     if (detail.open) history.replaceState(null, '', `#${{detail.id}}`);
   }});
+}}
+const chartTooltip = document.querySelector('#chart-tooltip');
+function showChartTooltip(point) {{
+  const box = point.getBoundingClientRect();
+  chartTooltip.textContent = point.dataset.tooltip;
+  chartTooltip.style.left = `${{box.left + box.width / 2}}px`;
+  chartTooltip.style.top = `${{box.top}}px`;
+  chartTooltip.classList.add('visible');
+}}
+for (const point of document.querySelectorAll('.chart-point')) {{
+  point.addEventListener('mouseenter', () => showChartTooltip(point));
+  point.addEventListener('focus', () => showChartTooltip(point));
+  point.addEventListener('mouseleave', () => chartTooltip.classList.remove('visible'));
+  point.addEventListener('blur', () => chartTooltip.classList.remove('visible'));
 }}
 </script></body></html>"""
 

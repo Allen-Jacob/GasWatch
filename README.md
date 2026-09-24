@@ -90,8 +90,10 @@ un changement de prix est toujours journalise. L'heure UTC de recuperation, la z
 la distance et l'attribution de la source sont conserves. Le volume Docker rend cet historique
 persistant apres les redemarrages et mises a jour.
 
-GasWatch demande au plus dix stations par zone et par carburant, conformement aux conditions
-d'usage ponctuel de Gas Quebec. Il ne tente pas de reconstituer le jeu de donnees provincial.
+GasWatch demande toutes les stations retournees dans le rayon configure (jusqu'a la limite REST
+documentee de 500 resultats) et les affiche sans appliquer les preferences de marque. Les favoris
+et preferences continuent d'influencer les recommandations et alertes. Il ne tente pas de
+reconstituer le jeu de donnees provincial.
 
 ### Plusieurs vehicules
 

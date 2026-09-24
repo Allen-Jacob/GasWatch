@@ -48,7 +48,9 @@ class GasWatchService:
                         self.settings.preferred_only,
                         self.settings.preferred_price_tolerance_cents,
                     )
-                    self.repository.save_observations(location.key, selected)
+                    # Preferences influence recommendations and notifications,
+                    # but the dashboard should retain every nearby station.
+                    self.repository.save_observations(location.key, prices)
                     self._latest[(location.key, fuel_type)] = selected
                     logger.info(
                         "Collecte terminee",

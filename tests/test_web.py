@@ -33,7 +33,7 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     page = render_dashboard(repository, settings)
     assert "Costco Quebec" in page
     assert "159.9" in page
-    assert "stations conservees" in page
+    assert "stations disponibles" in page
     assert "Mes reglages" in page
     assert "Station favorite" in page
     assert "Variation" in page
@@ -41,7 +41,11 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Historique de cette station" in page
     assert "Prix sur les 30 derniers jours" in page
     assert "data-station" in page
-    assert "--accent:#d7c7ad" in page
+    assert "Verdict du jour" in page
+    assert "Analyse en cours" in page
+    assert "chart-point" in page
+    assert 'data-tooltip="2026-' in page
+    assert "--green:#71d99b" in page
 
 
 def test_dashboard_has_empty_state(tmp_path, monkeypatch) -> None:
@@ -51,3 +55,34 @@ def test_dashboard_has_empty_state(tmp_path, monkeypatch) -> None:
     repository = Repository(settings.database_path)
     repository.initialize()
     assert "Premiere collecte en cours" in render_dashboard(repository, settings)
+
+
+def test_dashboard_does_not_cap_visible_stations(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME_LATITUDE", "46.8")
+    monkeypatch.setenv("HOME_LONGITUDE", "-71.2")
+    settings = Settings(_env_file=None, database_path=tmp_path / "gaswatch.db")
+    repository = Repository(settings.database_path)
+    repository.initialize()
+    repository.save_observations(
+        "HOME",
+        [
+            StationPrice(
+                f"id-{index}",
+                f"Station {index}",
+                "Marque",
+                f"Adresse {index}",
+                46.8,
+                -71.2,
+                float(index),
+                FuelType.REGULAR,
+                150 + index,
+                datetime.now(UTC),
+            )
+            for index in range(15)
+        ],
+    )
+
+    page = render_dashboard(repository, settings)
+
+    assert "15 stations disponibles" in page
+    assert "Station 14" in page
