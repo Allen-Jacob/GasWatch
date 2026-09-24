@@ -36,6 +36,9 @@ aucune extraction massive.
 ## Installation Docker Compose
 
 ```bash
+cd ~/apps # Choisir le dossier d'installation de vos docker
+git clone https://github.com/Allen-Jacob/GasWatch.git
+cd GasWatch
 cp .env.example .env
 # Modifier .env: coordonnees, vehicules et ntfy.
 docker compose pull
