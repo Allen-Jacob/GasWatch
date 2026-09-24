@@ -10,7 +10,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from app.config import Settings
 from app.database import Repository
@@ -19,6 +20,7 @@ from app.services.analysis import percentile, predict_price_direction
 from app.services.recommendations import recommend
 
 logger = logging.getLogger(__name__)
+STATIC_DIR = Path(__file__).with_name("static")
 
 
 def _station_ids(value: str) -> set[str]:
@@ -101,6 +103,12 @@ def _price_trend(points: list[float]) -> str:
         f'title="{label} de {abs(change):.1f} c/L depuis le relevé précédent" '
         f'aria-label="{label} de {abs(change):.1f} cents par litre">{arrow}</span>'
     )
+
+
+def _apple_maps_url(station: dict[str, object]) -> str:
+    query = f"{station['name']}, {station['address']}"
+    coordinates = f"{float(station['latitude']):.6f},{float(station['longitude']):.6f}"
+    return "https://maps.apple.com/?" + urlencode({"q": query, "ll": coordinates})
 
 
 def _forecast(prices: list[float]) -> tuple[str, str, str, str]:
@@ -228,24 +236,30 @@ def _recommendation_banner(
     )
     forecast_tone, forecast_arrow, forecast_title, forecast_detail = _forecast(daily_averages)
     return f"""
-    <section class="buy-advice {tone}" aria-labelledby="{html.escape(banner_id)}">
-      <div class="advice-icon" aria-hidden="true">↗</div>
-      <div class="advice-copy"><p class="eyebrow">Verdict du jour · {html.escape(location_name)}</p>
-        <h2 id="{html.escape(banner_id)}">{html.escape(heading)}</h2>
-        <p>{html.escape(result.reason)}</p></div>
-      <span class="advice-badge">{html.escape(badge)}</span>
-      <div class="forecast {forecast_tone}">
-        <span class="forecast-arrow" aria-hidden="true">{forecast_arrow}</span>
-        <span><strong>{html.escape(forecast_title)}</strong>
-          <small>{html.escape(forecast_detail)}</small></span>
+    <details class="buy-advice {tone}" aria-labelledby="{html.escape(banner_id)}">
+      <summary class="advice-summary">
+        <span class="advice-icon" aria-hidden="true">↗</span>
+        <span class="advice-copy"><span class="eyebrow">Verdict · {html.escape(location_name)}</span>
+          <strong id="{html.escape(banner_id)}">{html.escape(heading)}</strong></span>
+        <span class="forecast-compact {forecast_tone}" title="{html.escape(forecast_detail)}">
+          <span aria-hidden="true">{forecast_arrow}</span>{html.escape(forecast_title)}</span>
+        <span class="advice-badge">{html.escape(badge)}</span>
+      </summary>
+      <div class="advice-details">
+        <p>{html.escape(result.reason)}</p>
+        <div class="forecast {forecast_tone}">
+          <span class="forecast-arrow" aria-hidden="true">{forecast_arrow}</span>
+          <span><strong>{html.escape(forecast_title)}</strong>
+            <small>{html.escape(forecast_detail)}</small></span>
+        </div>
+        <div class="advice-metrics">
+          <div><span>Meilleur prix</span><strong>{stats.minimum:.1f} c/L</strong></div>
+          <div><span>Comparaison</span><strong>{html.escape(comparison)}</strong></div>
+          <div><span>Cible personnelle</span><strong>{html.escape(target_label)}</strong></div>
+          <div><span>Historique</span><strong>{len(daily_minimums)} jour{"s" if len(daily_minimums) != 1 else ""}</strong></div>
+        </div>
       </div>
-      <div class="advice-metrics">
-        <div><span>Meilleur prix</span><strong>{stats.minimum:.1f} c/L</strong></div>
-        <div><span>Comparaison</span><strong>{html.escape(comparison)}</strong></div>
-        <div><span>Cible personnelle</span><strong>{html.escape(target_label)}</strong></div>
-        <div><span>Historique</span><strong>{len(daily_minimums)} jour{"s" if len(daily_minimums) != 1 else ""}</strong></div>
-      </div>
-    </section>
+    </details>
     """
 
 
@@ -321,6 +335,7 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
             )
             logo = _brand_logo(item.get("brand"), item.get("name"))
             price_trend = _price_trend(station_points)
+            maps_url = html.escape(_apple_maps_url(item), quote=True)
             station_key = "station-" + "".join(
                 character if character.isalnum() else "-"
                 for character in f"{location_key}-{fuel_type}-{station_id}"
@@ -339,7 +354,8 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                   <summary>
                     <span class="station-name">{logo}<span class="station-copy">
                       <strong>{html.escape(str(item["name"]))}</strong>
-                      <small>{html.escape(str(item["address"]))}</small></span></span>
+                      <a class="station-address" href="{maps_url}" target="_blank" rel="noopener noreferrer"
+                        title="Ouvrir dans Apple Maps">{html.escape(str(item["address"]))}<span aria-hidden="true"> ↗</span></a></span></span>
                     <span class="station-price"><span>{float(item["price_cents"]):.1f}<small> c/L</small></span>{price_trend}</span>
                     <span>{float(item["distance_km"]):.1f} km</span>
                     <span>{html.escape(_age_label(str(item["fetched_at"]))[0])}</span>
@@ -455,33 +471,45 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta name="description" content="Tableau de bord local GasWatch">
+<meta name="theme-color" content="#111110"><meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="GasWatch">
 <meta http-equiv="refresh" content="60"><title>GasWatch</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111110'/%3E%3Cpath d='M18 12h25v43H18z' fill='%23d7c7ad'/%3E%3Cpath d='M23 18h15v13H23z' fill='%23111110'/%3E%3Cpath d='M43 22c8 1 6 14 6 21 0 5 6 5 6 0V28' fill='none' stroke='%23d7c7ad' stroke-width='5'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <style>
 :root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;
 --accent:#e6c77a;--soft:#fff3d3;--dim:#7d7971;--black:#0e0e0d;--green:#71d99b;
 --amber:#f0b45f;--red:#ef7d72;--blue:#70b8d7}}*{{box-sizing:border-box}}
 body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,sans-serif}}
 .shell{{width:min(1180px,calc(100% - 32px));margin:auto;padding:34px 0 64px}}
-header{{display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px}}
+header{{position:relative;z-index:5;display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px}}
 h1{{font-size:clamp(2rem,5vw,4rem);letter-spacing:-.06em;line-height:.9;margin:0}}h1 b{{color:var(--accent)}}
 header p,.meta,article p{{color:var(--muted);margin:.35rem 0 0;font-size:.875rem}}
-.buy-advice{{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:14px 18px;align-items:center;
-padding:22px 24px;margin-bottom:24px;border:1px solid color-mix(in srgb,var(--verdict) 52%,var(--line));
+.header-tools{{display:flex;align-items:center;gap:14px;text-align:right}}.settings-menu{{position:relative}}
+.settings-menu>summary{{display:grid;place-items:center;width:42px;height:42px;padding:0;list-style:none;cursor:pointer;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--accent);font-size:1.25rem}}
+.settings-menu>summary::-webkit-details-marker{{display:none}}.settings-menu>summary:hover,.settings-menu[open]>summary{{background:var(--panel2);border-color:var(--accent)}}
+.settings-menu>.settings{{position:absolute;top:calc(100% + 12px);right:0;width:min(720px,calc(100vw - 32px));z-index:30;text-align:left;box-shadow:0 22px 70px #000c}}
+.buy-advice{{position:relative;margin-bottom:16px;border:1px solid color-mix(in srgb,var(--verdict) 52%,var(--line));
 border-radius:18px;background:linear-gradient(120deg,color-mix(in srgb,var(--verdict) 14%,var(--panel)),var(--panel) 62%);overflow:hidden}}
 .buy-advice::after{{content:'';position:absolute;width:180px;height:180px;right:-70px;top:-100px;border-radius:50%;background:var(--verdict);opacity:.09}}
 .buy-advice.excellent,.buy-advice.good{{--verdict:var(--green)}}.buy-advice.normal{{--verdict:var(--blue)}}
 .buy-advice.wait,.buy-advice.learning{{--verdict:var(--amber)}}.buy-advice.high{{--verdict:var(--red)}}
-.advice-icon{{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:var(--verdict);color:#10110f;font-size:1.4rem;font-weight:900}}
-.advice-copy h2{{font-size:1.65rem;margin:2px 0}}.advice-copy>p:last-child{{color:var(--muted);margin:4px 0 0}}
+.advice-summary{{position:relative;z-index:1;display:grid;grid-template-columns:auto minmax(160px,1fr) minmax(210px,auto) auto auto;gap:12px;align-items:center;padding:13px 16px;cursor:pointer;list-style:none}}
+.advice-summary::-webkit-details-marker{{display:none}}.advice-summary::after{{content:'+';display:grid;place-items:center;width:24px;height:24px;border-radius:7px;background:#ffffff0b;color:var(--verdict);font-weight:900}}
+.buy-advice[open] .advice-summary::after{{content:'−'}}.advice-summary:hover{{background:#ffffff05}}
+.advice-icon{{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:var(--verdict);color:#10110f;font-size:1.1rem;font-weight:900}}
+.advice-copy span,.advice-copy strong{{display:block}}.advice-copy strong{{font-size:1rem;margin-top:1px}}
 .advice-badge{{position:relative;z-index:1;color:var(--verdict);border:1px solid color-mix(in srgb,var(--verdict) 55%,transparent);background:#111;
-padding:7px 11px;border-radius:99px;font-size:.78rem;font-weight:800}}
-.forecast{{grid-column:1/-1;display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:11px;
+padding:5px 9px;border-radius:99px;font-size:.7rem;font-weight:800}}
+.forecast-compact{{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.78rem;font-weight:750}}.forecast-compact>span{{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;font-size:1rem;font-weight:950}}
+.forecast-compact.up>span{{color:var(--red);background:#ef7d7218}}.forecast-compact.down>span{{color:var(--green);background:#71d99b18}}.forecast-compact.stable>span{{color:var(--blue);background:#70b8d718}}.forecast-compact.unknown>span{{color:var(--dim);background:#ffffff0a}}
+.advice-details{{position:relative;z-index:1;padding:0 16px 16px;border-top:1px solid var(--line)}}.advice-details>p{{color:var(--muted);font-size:.88rem;margin:14px 0}}
+.forecast{{display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:11px;
 background:#10100f;border:1px solid var(--line)}}.forecast-arrow{{display:grid;place-items:center;flex:0 0 32px;height:32px;border-radius:9px;font-size:1.25rem;font-weight:900}}
 .forecast strong,.forecast small{{display:block}}.forecast strong{{font-size:.9rem}}.forecast small{{color:var(--muted);font-size:.75rem;margin-top:1px}}
 .forecast.up .forecast-arrow{{color:#18110e;background:var(--red)}}.forecast.down .forecast-arrow{{color:#0c1510;background:var(--green)}}
 .forecast.stable .forecast-arrow{{color:#101417;background:var(--blue)}}.forecast.unknown .forecast-arrow{{color:#171512;background:var(--amber)}}
-.advice-metrics{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);padding-top:16px;margin-top:2px}}
+.advice-metrics{{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);padding-top:16px;margin-top:14px}}
 .advice-metrics div{{padding:0 16px;border-right:1px solid var(--line)}}.advice-metrics div:first-child{{padding-left:0}}.advice-metrics div:last-child{{border:0}}
 .advice-metrics span{{display:block;color:var(--muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.07em}}
 .advice-metrics strong{{display:block;font-size:.92rem;margin-top:3px}}
@@ -504,7 +532,7 @@ article strong{{display:block;font-size:2.3rem;margin-top:12px;letter-spacing:-.
 #chart-tooltip{{position:fixed;z-index:20;pointer-events:none;opacity:0;transform:translate(-50%,-115%);padding:7px 10px;
 border-radius:8px;background:var(--soft);color:#171512;font-size:.78rem;font-weight:800;box-shadow:0 8px 30px #0009;transition:opacity .12s ease;white-space:nowrap}}
 #chart-tooltip.visible{{opacity:1}}
-.settings{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;margin-bottom:24px}}
+.settings{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;margin:0}}
 .settings h2{{margin-bottom:14px}}.settings-form{{display:grid;grid-template-columns:1fr 1fr .7fr auto;gap:12px;align-items:end}}
 label{{display:grid;gap:6px;color:var(--muted);font-size:.8rem}}input,select,button{{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}}
 input,select{{background:#10100f;color:var(--ink);min-width:0}}button{{background:var(--accent);color:#171512;font-weight:800;cursor:pointer}}
@@ -526,7 +554,8 @@ button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:
 .station-card[open] summary::after{{content:'−'}}
 .station-card summary>span{{color:var(--muted);font-size:.88rem}}.station-name{{display:flex;align-items:center;gap:10px;min-width:0}}
 .station-copy{{min-width:0}}.station-name strong{{display:block;color:var(--ink);font-size:1rem}}
-.station-name small{{display:block;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.station-address{{display:block;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-decoration:none}}
+.station-address:hover,.station-address:focus{{color:var(--accent);text-decoration:underline}}
 .brand-logo{{display:inline-grid;place-items:center;flex:0 0 42px;height:30px;border-radius:7px;border:1px solid #ffffff2a;
 font-size:.62rem;font-weight:950;letter-spacing:-.04em;line-height:1;text-transform:none;box-shadow:inset 0 0 0 1px #0002}}
 .brand-costco{{color:#e51b23;background:#fff;text-decoration:underline;text-decoration-color:#1869a7;text-decoration-thickness:2px}}
@@ -551,8 +580,9 @@ font-size:.95rem!important;font-weight:950;vertical-align:.15em;letter-spacing:0
 .more-stations>summary::-webkit-details-marker{{display:none}}.more-stations>summary::after{{content:' ↓'}}.more-stations[open]>summary::after{{content:' ↑'}}
 .empty{{text-align:center;padding:80px 24px;background:var(--panel);border:1px solid var(--line);border-radius:18px}}
 .pump{{font-size:3rem}}footer{{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:.8rem;margin-top:24px}}
-@media(max-width:760px){{.shell{{width:min(100% - 20px,1180px);padding-top:22px}}header{{align-items:start}}header>p{{text-align:right;max-width:160px}}
-.buy-advice{{grid-template-columns:auto 1fr;padding:18px}}.advice-badge{{grid-column:1/-1;width:max-content}}
+@media(max-width:760px){{.shell{{width:min(100% - 20px,1180px);padding-top:22px}}header{{align-items:start}}.header-tools>p{{display:none}}
+.settings-menu>.settings{{width:calc(100vw - 20px);right:-1px}}.advice-summary{{grid-template-columns:auto minmax(0,1fr) auto;padding:12px}}
+.forecast-compact{{grid-column:2/-1;grid-row:2}}.advice-badge{{display:none}}.advice-summary::after{{grid-column:3;grid-row:1}}
 .advice-metrics{{grid-template-columns:1fr 1fr;gap:14px 0}}.advice-metrics div:nth-child(2){{border:0}}.advice-metrics div:nth-child(3){{padding-left:0}}
 .settings{{padding:18px}}.settings-form{{grid-template-columns:1fr 1fr}}.settings-form button{{grid-column:1/-1}}
 .summary-grid{{grid-template-columns:1fr 1fr}}article{{padding:18px;min-height:130px}}article.trend{{grid-column:1/-1;border-top:1px solid var(--line)}}
@@ -561,9 +591,10 @@ font-size:.95rem!important;font-weight:950;vertical-align:.15em;letter-spacing:0
 .station-price{{padding-right:3px}}.station-actions{{gap:3px}}.icon-button{{width:32px;height:32px}}.station-detail{{grid-template-columns:1fr;padding:18px}}.station-stats{{grid-template-columns:1fr 1fr}}
 footer{{display:block}}}}
 </style></head><body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
-<p>Prix recents autour de vos emplacements</p></div><p>Actualisation automatique<br>toutes les 60 secondes</p></header>
-{"".join(advice_banners)}
-<section class="settings"><h2>Mes reglages</h2>
+<p>Prix recents autour de vos emplacements</p></div><div class="header-tools">
+<p>Actualisation automatique<br>toutes les 60 secondes</p><details class="settings-menu">
+<summary aria-label="Ouvrir mes réglages" title="Mes réglages">⚙</summary>
+<section class="settings"><h2>Mes réglages</h2>
 <form method="post" action="/settings" class="settings-form">
 <input type="hidden" name="csrf" value="{{csrf_token}}">
 <label>Latitude<input name="latitude" inputmode="decimal" required value="{html.escape(latitude)}"></label>
@@ -571,7 +602,8 @@ footer{{display:block}}}}
 <label>Rayon (km)<input name="radius" inputmode="decimal" required value="{html.escape(radius)}"></label>
 <button type="submit">Enregistrer</button></form>
 <p>Utilisez l'etoile a cote d'une station pour la garder en haut. La position est envoyee uniquement a Gas Quebec pour la recherche.</p>
-{f'<div class="excluded-list"><h3>Stations exclues</h3>{excluded_controls}</div>' if excluded_controls else ""}</section>
+{f'<div class="excluded-list"><h3>Stations exclues</h3>{excluded_controls}</div>' if excluded_controls else ""}</section></details></div></header>
+{"".join(advice_banners)}
 {"".join(sections)}
 <footer><span>* Distance geographique, pas routiere.</span><span>Page generee {generated}</span></footer>
 </main><div id="chart-tooltip" role="tooltip"></div><script>
@@ -583,6 +615,9 @@ for (const detail of document.querySelectorAll('[data-station]')) {{
 }}
 for (const button of document.querySelectorAll('.station-actions button')) {{
   button.addEventListener('click', event => event.stopPropagation());
+}}
+for (const link of document.querySelectorAll('.station-address')) {{
+  link.addEventListener('click', event => event.stopPropagation());
 }}
 const chartTooltip = document.querySelector('#chart-tooltip');
 function showChartTooltip(point) {{
@@ -627,7 +662,19 @@ class DashboardServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 path = urlparse(self.path).path
-                if path == "/health":
+                if path == "/favicon.svg":
+                    self._send(
+                        HTTPStatus.OK,
+                        "image/svg+xml",
+                        (STATIC_DIR / "app-icon.svg").read_bytes(),
+                    )
+                elif path == "/apple-touch-icon.png":
+                    self._send(
+                        HTTPStatus.OK,
+                        "image/png",
+                        (STATIC_DIR / "apple-touch-icon.png").read_bytes(),
+                    )
+                elif path == "/health":
                     self._send(
                         HTTPStatus.OK
                         if outer.repository.healthy()

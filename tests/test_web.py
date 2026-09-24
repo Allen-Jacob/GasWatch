@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 from app.config import Settings
 from app.database import Repository
 from app.domain import FuelType, StationPrice
-from app.web import _updated_station_preferences, render_dashboard
+from app.web import STATIC_DIR, _updated_station_preferences, render_dashboard
+
+
+def test_home_screen_icons_are_packaged() -> None:
+    assert (STATIC_DIR / "app-icon.svg").read_text().startswith("<svg")
+    assert (STATIC_DIR / "apple-touch-icon.png").read_bytes().startswith(b"\x89PNG")
 
 
 def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
@@ -34,7 +39,8 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Costco Quebec" in page
     assert "159.9" in page
     assert "stations disponibles" in page
-    assert "Mes reglages" in page
+    assert "Mes réglages" in page
+    assert 'class="settings-menu"' in page
     assert "Ajouter aux favoris" in page
     assert "Ne plus afficher cette station" in page
     assert 'name="favorite_station_id"' not in page
@@ -43,14 +49,17 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Historique de cette station" in page
     assert "Prix sur les 30 derniers jours" in page
     assert "data-station" in page
-    assert "Verdict du jour" in page
+    assert "Verdict ·" in page
     assert "Analyse en cours" in page
+    assert '<details class="buy-advice learning"' in page
     assert "chart-point" in page
     assert "data-chart" in page
     assert 'data-tooltip="2026-' in page
     assert "brand-costco" in page
     assert "Tendance à venir" in page
     assert "price-direction" in page
+    assert "https://maps.apple.com/?q=Costco+Quebec%2C+440+rue+Bouvier" in page
+    assert 'rel="apple-touch-icon" sizes="180x180"' in page
     assert "--green:#71d99b" in page
 
 

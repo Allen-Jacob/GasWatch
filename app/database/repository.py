@@ -290,7 +290,7 @@ class Repository:
             rows = db.execute(
                 """
                 WITH ranked AS (
-                    SELECT o.*, s.name, s.brand, s.address,
+                    SELECT o.*, s.name, s.brand, s.address, s.latitude, s.longitude,
                            ROW_NUMBER() OVER (
                                PARTITION BY o.location_key, o.fuel_type, o.station_id
                                ORDER BY o.fetched_at DESC
@@ -300,6 +300,7 @@ class Repository:
                       ON s.provider=o.provider AND s.station_id=o.station_id
                 )
                 SELECT location_key, fuel_type, station_id, name, brand, address,
+                       latitude, longitude,
                        price_cents, distance_km, fetched_at, source
                 FROM ranked
                 WHERE position=1 AND fetched_at>=?

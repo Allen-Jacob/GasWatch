@@ -90,7 +90,9 @@ logos compacts des principales enseignes et une fleche de variation accompagnent
 verdict montre aussi une tendance courte et prudente, calculee uniquement a partir des sept derniers
 jours disponibles dans la base locale. Une etoile place une ou plusieurs stations favorites en tete;
 les autres restent accessibles sous « Voir plus ». Une station peut aussi etre exclue puis
-reaffichee depuis « Mes reglages ».
+reaffichee depuis la roue dentee « Mes reglages » dans l'en-tete. Le verdict est compact et se
+deplie au toucher pour montrer son explication et ses statistiques. Toucher l'adresse d'une station
+l'ouvre directement dans Apple Maps. L'icone GasWatch est aussi fournie pour l'ecran d'accueil iOS.
 `/api/dashboard` fournit les memes donnees en JSON et `/health` sert au healthcheck Docker.
 
 La base conserve les stations et les observations dans `stations` et `price_observations`. Pour
