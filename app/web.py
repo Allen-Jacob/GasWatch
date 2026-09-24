@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from app.config import Settings
 from app.database import Repository
 from app.domain import PriceStats, RecommendationCode
-from app.services.analysis import percentile
+from app.services.analysis import percentile, predict_price_direction
 from app.services.recommendations import recommend
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,67 @@ def _age_label(timestamp: str) -> tuple[str, str]:
     return f"il y a {hours // 24} j", "stale"
 
 
+def _brand_logo(brand: object, name: object) -> str:
+    """Return a compact, offline brand mark with a generic fallback."""
+    label = str(brand or name).strip()
+    normalized = label.casefold().replace("-", " ")
+    brands = (
+        ("costco", "costco", "Costco"),
+        ("irving", "irving", "Irving"),
+        ("petro canada", "petro-canada", "Petro"),
+        ("esso", "esso", "Esso"),
+        ("shell", "shell", "Shell"),
+        ("ultramar", "ultramar", "Ultra"),
+        ("canadian tire", "canadian-tire", "CT"),
+        ("couchetard", "couche-tard", "C-T"),
+        ("couche tard", "couche-tard", "C-T"),
+    )
+    for needle, css_name, wordmark in brands:
+        if needle in normalized:
+            return f'<span class="brand-logo brand-{css_name}" aria-hidden="true">{wordmark}</span>'
+    initial = next((character.upper() for character in label if character.isalnum()), "⛽")
+    return (
+        f'<span class="brand-logo brand-generic" aria-hidden="true">{html.escape(initial)}</span>'
+    )
+
+
+def _price_trend(points: list[float]) -> str:
+    if len(points) < 2:
+        return '<span class="price-direction unknown" title="Tendance en calcul">·</span>'
+    change = points[-1] - points[-2]
+    if abs(change) < 0.05:
+        return '<span class="price-direction stable" title="Prix stable">→</span>'
+    direction = "up" if change > 0 else "down"
+    label = "En hausse" if change > 0 else "En baisse"
+    arrow = "↑" if change > 0 else "↓"
+    return (
+        f'<span class="price-direction {direction}" '
+        f'title="{label} de {abs(change):.1f} c/L depuis le relevé précédent" '
+        f'aria-label="{label} de {abs(change):.1f} cents par litre">{arrow}</span>'
+    )
+
+
+def _forecast(prices: list[float]) -> tuple[str, str, str, str]:
+    direction, slope, confidence = predict_price_direction(prices)
+    if direction == "unknown":
+        return "unknown", "·", "Tendance à venir : en calcul", "Il faut au moins 2 jours"
+    if direction == "stable":
+        return (
+            "stable",
+            "→",
+            "Tendance à venir : plutôt stable",
+            f"Signal {confidence} · {len(prices[-7:])} jours de vos données",
+        )
+    label = "hausse" if direction == "up" else "baisse"
+    arrow = "↑" if direction == "up" else "↓"
+    return (
+        direction,
+        arrow,
+        f"Tendance à venir : {label} probable",
+        f"Signal {confidence} · {slope:+.1f} c/L par jour · vos {len(prices[-7:])} derniers jours",
+    )
+
+
 def _sparkline(
     points: list[float],
     label: str = "Evolution du prix",
@@ -88,7 +149,7 @@ def _sparkline(
             f'tabindex="0" data-tooltip="{tooltip}"><title>{tooltip}</title></circle>'
         )
     return (
-        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" data-chart '
         f'aria-label="{html.escape(label)}"><polyline points="{" ".join(coords)}" />'
         f'{"".join(markers)}<text x="8" y="16">{high:.1f}</text>'
         f'<text x="8" y="110">{low:.1f}</text></svg>'
@@ -104,6 +165,7 @@ def _recommendation_banner(
     settings: Settings,
 ) -> str:
     daily_minimums = [float(item["minimum"]) for item in market_history]
+    daily_averages = [float(item["average"]) for item in market_history]
     target = (
         settings.manual_target_price_cents
         if settings.target_price_mode == "MANUAL"
@@ -164,6 +226,7 @@ def _recommendation_banner(
     banner_id = "advice-" + "".join(
         character if character.isalnum() else "-" for character in f"{location_key}-{fuel_type}"
     )
+    forecast_tone, forecast_arrow, forecast_title, forecast_detail = _forecast(daily_averages)
     return f"""
     <section class="buy-advice {tone}" aria-labelledby="{html.escape(banner_id)}">
       <div class="advice-icon" aria-hidden="true">↗</div>
@@ -171,6 +234,11 @@ def _recommendation_banner(
         <h2 id="{html.escape(banner_id)}">{html.escape(heading)}</h2>
         <p>{html.escape(result.reason)}</p></div>
       <span class="advice-badge">{html.escape(badge)}</span>
+      <div class="forecast {forecast_tone}">
+        <span class="forecast-arrow" aria-hidden="true">{forecast_arrow}</span>
+        <span><strong>{html.escape(forecast_title)}</strong>
+          <small>{html.escape(forecast_detail)}</small></span>
+      </div>
       <div class="advice-metrics">
         <div><span>Meilleur prix</span><strong>{stats.minimum:.1f} c/L</strong></div>
         <div><span>Comparaison</span><strong>{html.escape(comparison)}</strong></div>
@@ -251,6 +319,8 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
             station_change = (
                 station_points[-1] - station_points[0] if len(station_points) > 1 else None
             )
+            logo = _brand_logo(item.get("brand"), item.get("name"))
+            price_trend = _price_trend(station_points)
             station_key = "station-" + "".join(
                 character if character.isalnum() else "-"
                 for character in f"{location_key}-{fuel_type}-{station_id}"
@@ -267,9 +337,10 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
                   <input type="hidden" name="return_hash" value="{html.escape(station_key)}">
                   <details class="station-card {"is-favorite" if is_favorite else ""}" id="{html.escape(station_key)}" data-station>
                   <summary>
-                    <span class="station-name"><strong>{html.escape(str(item["name"]))}</strong>
-                      <small>{html.escape(str(item["address"]))}</small></span>
-                    <span class="station-price">{float(item["price_cents"]):.1f}<small> c/L</small></span>
+                    <span class="station-name">{logo}<span class="station-copy">
+                      <strong>{html.escape(str(item["name"]))}</strong>
+                      <small>{html.escape(str(item["address"]))}</small></span></span>
+                    <span class="station-price"><span>{float(item["price_cents"]):.1f}<small> c/L</small></span>{price_trend}</span>
                     <span>{float(item["distance_km"]):.1f} km</span>
                     <span>{html.escape(_age_label(str(item["fetched_at"]))[0])}</span>
                     <span class="station-actions">
@@ -329,6 +400,8 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         history_max = max(averages) if averages else None
         history_avg = sum(averages) / len(averages) if averages else None
         change = averages[-1] - averages[0] if len(averages) > 1 else None
+        best_logo = _brand_logo(best.get("brand"), best.get("name"))
+        market_price_trend = _price_trend(averages)
 
         stats_cards = (
             f"<div><span>Minimum</span><strong>{metric(history_min).lstrip('+')}</strong></div>"
@@ -356,9 +429,9 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
               </div>
               <div class="summary-grid">
                 <article class="hero-price"><span>Meilleur prix</span>
-                  <strong>{float(best["price_cents"]):.1f}<small> c/L</small></strong>
-                  <p>{html.escape(str(best["name"]))}</p></article>
-                <article><span>Moyenne locale</span><strong>{average:.1f}<small> c/L</small></strong>
+                  <strong>{float(best["price_cents"]):.1f}<small> c/L</small>{_price_trend([float(point["price_cents"]) for point in grouped_station_history[(location_key, fuel_type, str(best["station_id"]))]])}</strong>
+                  <p class="hero-station">{best_logo}{html.escape(str(best["name"]))}</p></article>
+                <article><span>Moyenne locale</span><strong>{average:.1f}<small> c/L</small>{market_price_trend}</strong>
                   <p>{len(stations)} stations disponibles</p></article>
                 <article class="trend"><span>Moyenne des stations suivies — {settings.history_days} jours</span>
                   {chart}<div class="history-stats">{stats_cards}</div></article>
@@ -403,6 +476,11 @@ border-radius:18px;background:linear-gradient(120deg,color-mix(in srgb,var(--ver
 .advice-copy h2{{font-size:1.65rem;margin:2px 0}}.advice-copy>p:last-child{{color:var(--muted);margin:4px 0 0}}
 .advice-badge{{position:relative;z-index:1;color:var(--verdict);border:1px solid color-mix(in srgb,var(--verdict) 55%,transparent);background:#111;
 padding:7px 11px;border-radius:99px;font-size:.78rem;font-weight:800}}
+.forecast{{grid-column:1/-1;display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:11px;
+background:#10100f;border:1px solid var(--line)}}.forecast-arrow{{display:grid;place-items:center;flex:0 0 32px;height:32px;border-radius:9px;font-size:1.25rem;font-weight:900}}
+.forecast strong,.forecast small{{display:block}}.forecast strong{{font-size:.9rem}}.forecast small{{color:var(--muted);font-size:.75rem;margin-top:1px}}
+.forecast.up .forecast-arrow{{color:#18110e;background:var(--red)}}.forecast.down .forecast-arrow{{color:#0c1510;background:var(--green)}}
+.forecast.stable .forecast-arrow{{color:#101417;background:var(--blue)}}.forecast.unknown .forecast-arrow{{color:#171512;background:var(--amber)}}
 .advice-metrics{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);padding-top:16px;margin-top:2px}}
 .advice-metrics div{{padding:0 16px;border-right:1px solid var(--line)}}.advice-metrics div:first-child{{padding-left:0}}.advice-metrics div:last-child{{border:0}}
 .advice-metrics span{{display:block;color:var(--muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.07em}}
@@ -417,10 +495,11 @@ h2{{margin:2px 0 0;font-size:1.5rem}}h3{{margin:2px 0 0;font-size:1.1rem}}
 article{{min-height:150px;padding:22px 26px;border-right:1px solid var(--line)}}article:last-child{{border:0}}
 article>span{{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.08em}}
 article strong{{display:block;font-size:2.3rem;margin-top:12px;letter-spacing:-.04em}}article small{{font-size:.9rem;color:var(--muted)}}
-.hero-price{{background:var(--panel2)}}.hero-price strong{{color:var(--accent)}}.chart{{display:block;width:100%;height:90px;margin-top:8px}}
+.hero-price{{background:var(--panel2)}}.hero-price strong{{color:var(--accent)}}.hero-station{{display:flex;align-items:center;gap:7px}}
+.chart{{display:block;width:100%;height:90px;margin-top:8px;cursor:crosshair}}
 .chart polyline{{fill:none;stroke:var(--accent);stroke-width:4;stroke-linejoin:round;stroke-linecap:round}}
-.chart-point{{fill:var(--panel);stroke:var(--accent);stroke-width:3;cursor:crosshair;transition:r .15s ease,fill .15s ease}}
-.chart-point:hover,.chart-point:focus{{r:7;fill:var(--accent);outline:none}}
+.chart-point{{fill:var(--panel);stroke:var(--accent);stroke-width:3;pointer-events:none;transition:r .15s ease,fill .15s ease}}
+.chart-point.active,.chart-point:focus{{r:7;fill:var(--accent);outline:none}}
 .chart text{{fill:var(--muted);font-size:12px}}.empty-chart{{color:var(--muted);padding-top:35px}}
 #chart-tooltip{{position:fixed;z-index:20;pointer-events:none;opacity:0;transform:translate(-50%,-115%);padding:7px 10px;
 border-radius:8px;background:var(--soft);color:#171512;font-size:.78rem;font-weight:800;box-shadow:0 8px 30px #0009;transition:opacity .12s ease;white-space:nowrap}}
@@ -445,9 +524,22 @@ button:hover{{background:var(--soft)}}.settings>p{{color:var(--muted);font-size:
 .station-card summary:hover,.station-card[open] summary{{background:var(--panel2)}}
 .station-card summary::after{{content:'+';color:var(--accent);font-size:1.25rem;text-align:center}}
 .station-card[open] summary::after{{content:'−'}}
-.station-card summary>span{{color:var(--muted);font-size:.88rem}}.station-name strong{{display:block;color:var(--ink);font-size:1rem}}
+.station-card summary>span{{color:var(--muted);font-size:.88rem}}.station-name{{display:flex;align-items:center;gap:10px;min-width:0}}
+.station-copy{{min-width:0}}.station-name strong{{display:block;color:var(--ink);font-size:1rem}}
 .station-name small{{display:block;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.station-price{{color:var(--accent)!important;font-size:1.2rem!important;font-weight:800}}.station-price small{{font-size:.75rem}}
+.brand-logo{{display:inline-grid;place-items:center;flex:0 0 42px;height:30px;border-radius:7px;border:1px solid #ffffff2a;
+font-size:.62rem;font-weight:950;letter-spacing:-.04em;line-height:1;text-transform:none;box-shadow:inset 0 0 0 1px #0002}}
+.brand-costco{{color:#e51b23;background:#fff;text-decoration:underline;text-decoration-color:#1869a7;text-decoration-thickness:2px}}
+.brand-irving{{color:#fff;background:#168244}}.brand-petro-canada{{color:#fff;background:#d91e2b}}
+.brand-esso{{color:#114b9b;background:#fff;border-color:#e32636;border-radius:50%}}
+.brand-shell{{color:#d71920;background:#ffd62c}}.brand-ultramar{{color:#fff;background:#13489d}}
+.brand-canadian-tire{{color:#fff;background:#d71920}}.brand-couche-tard{{color:#fff;background:#e1262f}}
+.brand-generic{{color:var(--soft);background:#34322d}}
+.station-price{{display:flex;align-items:center;gap:7px;color:var(--accent)!important;font-size:1.2rem!important;font-weight:800}}
+.station-price small{{font-size:.75rem}}.price-direction{{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:7px;
+font-size:.95rem!important;font-weight:950;vertical-align:.15em;letter-spacing:0}}
+.price-direction.up{{color:var(--red);background:#ef7d7218}}.price-direction.down{{color:var(--green);background:#71d99b18}}
+.price-direction.stable{{color:var(--blue);background:#70b8d718}}.price-direction.unknown{{color:var(--dim);background:#ffffff0a}}
 .station-actions{{display:flex;gap:5px}}.icon-button{{display:grid;place-items:center;width:36px;height:34px;padding:0;background:transparent;color:var(--muted);font-size:1.15rem}}
 .icon-button:hover,.icon-button:focus{{background:var(--panel);color:var(--accent)}}.favorite-button.active{{color:var(--accent);background:#2a2518}}
 .exclude-button:hover,.exclude-button:focus{{color:var(--red);border-color:var(--red)}}
@@ -500,10 +592,26 @@ function showChartTooltip(point) {{
   chartTooltip.style.top = `${{box.top}}px`;
   chartTooltip.classList.add('visible');
 }}
+function hideChartTooltip(chart) {{
+  chartTooltip.classList.remove('visible');
+  chart.querySelector('.chart-point.active')?.classList.remove('active');
+}}
+for (const chart of document.querySelectorAll('[data-chart]')) {{
+  const points = [...chart.querySelectorAll('.chart-point')];
+  chart.addEventListener('pointermove', event => {{
+    const nearest = points.reduce((best, point) => {{
+      const pointX = point.getBoundingClientRect().left;
+      const bestX = best.getBoundingClientRect().left;
+      return Math.abs(pointX - event.clientX) < Math.abs(bestX - event.clientX) ? point : best;
+    }});
+    chart.querySelector('.chart-point.active')?.classList.remove('active');
+    nearest.classList.add('active');
+    showChartTooltip(nearest);
+  }});
+  chart.addEventListener('pointerleave', () => hideChartTooltip(chart));
+}}
 for (const point of document.querySelectorAll('.chart-point')) {{
-  point.addEventListener('mouseenter', () => showChartTooltip(point));
   point.addEventListener('focus', () => showChartTooltip(point));
-  point.addEventListener('mouseleave', () => chartTooltip.classList.remove('visible'));
   point.addEventListener('blur', () => chartTooltip.classList.remove('visible'));
 }}
 </script></body></html>"""
