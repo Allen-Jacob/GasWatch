@@ -81,8 +81,11 @@ Toutes les options sont documentees dans `.env.example`. Les groupes principaux 
 La page `/` lit directement SQLite et affiche le dernier prix conserve pour chaque station proche,
 la moyenne locale, la distance geographique, l'age du releve et la courbe de la moyenne quotidienne
 des stations suivies. Chaque station est cliquable et revele son propre historique de prix sur
-30 jours, avec son minimum, son maximum et sa variation. Les points des graphiques affichent leur
-date et leur prix exact au survol. Une etoile place une ou plusieurs stations favorites en tete;
+30 jours, avec son minimum, son maximum et sa variation. Les graphiques selectionnent le point le
+plus proche lorsque la souris passe sur toute la ligne et affichent sa date et son prix exact. Les
+logos compacts des principales enseignes et une fleche de variation accompagnent les prix. Le
+verdict montre aussi une tendance courte et prudente, calculee uniquement a partir des sept derniers
+jours disponibles dans la base locale. Une etoile place une ou plusieurs stations favorites en tete;
 les autres restent accessibles sous « Voir plus ». Une station peut aussi etre exclue puis
 reaffichee depuis « Mes reglages ».
 `/api/dashboard` fournit les memes donnees en JSON et `/health` sert au healthcheck Docker.
@@ -127,7 +130,10 @@ Definissez `LOCATIONS=HOME,WORK`, puis pour chaque cle:
 
 En mode `AUTO`, GasWatch attend au moins `MINIMUM_HISTORY_DAYS` minimums quotidiens puis calcule
 le percentile configure. Il compare le minimum actuel aux minimums historiques du meme secteur et
-du meme carburant. Il ne predit pas le prix futur. En mode `MANUAL`, la cible vient de
+du meme carburant. La recommandation d'achat ne tente pas de predire le prix futur. L'interface
+affiche separement une estimation de direction a court terme (hausse, baisse ou stable), issue d'une
+regression lineaire sur un maximum de sept moyennes quotidiennes locales. Il s'agit d'un signal
+indicatif, pas d'une prevision de marche. En mode `MANUAL`, la cible vient de
 `MANUAL_TARGET_PRICE_CENTS`.
 
 `FILL_NOW` signifie que le prix atteint la cible et se situe nettement sous l'historique, ou que

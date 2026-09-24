@@ -46,7 +46,11 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Verdict du jour" in page
     assert "Analyse en cours" in page
     assert "chart-point" in page
+    assert "data-chart" in page
     assert 'data-tooltip="2026-' in page
+    assert "brand-costco" in page
+    assert "Tendance à venir" in page
+    assert "price-direction" in page
     assert "--green:#71d99b" in page
 
 

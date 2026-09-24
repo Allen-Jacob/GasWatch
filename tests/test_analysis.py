@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from app.domain import FuelType, StationPrice
-from app.services.analysis import analyze, percentile
+from app.services.analysis import analyze, percentile, predict_price_direction
 
 
 def station(price: float) -> StationPrice:
@@ -31,3 +31,14 @@ def test_analyze_current_and_historical_prices() -> None:
     assert stats.median == 160
     assert stats.maximum == 170
     assert stats.historical_average == 150
+
+
+def test_predict_price_direction_uses_recent_local_trend() -> None:
+    direction, slope, confidence = predict_price_direction([150, 151, 152, 153, 154])
+    assert direction == "up"
+    assert slope == 1
+    assert confidence == "fort"
+
+    assert predict_price_direction([154, 153, 152])[0] == "down"
+    assert predict_price_direction([150, 150.1, 150.1])[0] == "stable"
+    assert predict_price_direction([150])[0] == "unknown"
