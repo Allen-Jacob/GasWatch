@@ -8,10 +8,11 @@ from app.database import Repository
 from app.domain import FuelType, Location, StationPrice, Vehicle
 from app.notifications.base import Notifier
 from app.providers.base import FuelPriceProvider
-from app.services.analysis import analyze, percentile
+from app.services.analysis import analyze, forecast_prices, percentile
 from app.services.recommendations import recommend
 from app.services.reports import build_report
 from app.services.stations import filter_and_rank
+from app.services.trip_cost import evaluate_trip
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,40 @@ class GasWatchService:
                         self._favorite_ids(),
                         self.settings.preferred_only,
                         self.settings.preferred_price_tolerance_cents,
+                        reference_cents=(
+                            sum(price.price_cents for price in prices) / len(prices)
+                            if prices
+                            else None
+                        ),
+                        liters=self._vehicles_for(fuel_type)[0].average_fill_l,
+                        consumption_l_per_100km=self._vehicles_for(fuel_type)[
+                            0
+                        ].consumption_l_per_100km,
+                        max_detour_km=self.settings.max_detour_km,
+                        min_net_savings=self.settings.min_net_savings,
                     )
                     # Preferences influence recommendations and notifications,
                     # but the dashboard should retain every nearby station.
                     self.repository.save_observations(location.key, prices)
+                    if prices:
+                        current_average = sum(price.price_cents for price in prices) / len(prices)
+                        self.repository.evaluate_predictions(
+                            location.key, fuel_type, current_average
+                        )
+                        daily_values = [
+                            float(row["average"])
+                            for row in self.repository.dashboard_history(14)
+                            if row["location_key"] == location.key
+                            and row["fuel_type"] == fuel_type.value
+                        ]
+                        for forecast in forecast_prices(daily_values):
+                            self.repository.record_prediction(
+                                location.key,
+                                fuel_type,
+                                forecast.horizon_hours,
+                                forecast.price_cents,
+                                forecast.confidence,
+                            )
                     self._latest[(location.key, fuel_type)] = selected
                     logger.info(
                         "Collecte terminee",
@@ -138,10 +169,9 @@ class GasWatchService:
             )
             if datetime.now(UTC) - sent_at < cooldown and not meaningful_drop:
                 return
-        message = (
-            f"{fuel_type.value}: {station.price_cents:.1f} c/L chez {station.name}\n"
-            f"Cible: {target:.1f} c/L — {location.name}\n"
-            f"{station.source}. Prix recent, a verifier a la pompe."
+        percentile_history = self.repository.daily_minimums(location.key, fuel_type, 90)
+        message = self._smart_alert_message(
+            location, fuel_type, station, fresh, percentile_history or history, target
         )
         try:
             await self.notifier.send("⛽ GasWatch — Alerte prix", message, "high")
@@ -152,6 +182,93 @@ class GasWatchService:
             logger.exception("Echec de l'alerte ntfy")
         else:
             self.repository.record_alert(alert_key, station.station_id, station.price_cents, "sent")
+
+    def _smart_alert_message(
+        self,
+        location: Location,
+        fuel_type: FuelType,
+        station: StationPrice,
+        prices: list[StationPrice],
+        history: list[float],
+        target: float,
+    ) -> str:
+        vehicle = self._vehicles_for(fuel_type)[0]
+        average = sum(item.price_cents for item in prices) / len(prices)
+        trip = evaluate_trip(
+            average,
+            station.price_cents,
+            vehicle.average_fill_l,
+            station.distance_km,
+            vehicle.consumption_l_per_100km,
+            self.settings.max_detour_km,
+            self.settings.min_net_savings,
+        )
+        rank = (
+            100 * sum(value <= station.price_cents for value in history) / len(history)
+            if history
+            else None
+        )
+        low_tank = (
+            vehicle.usable_range_km() is not None
+            and vehicle.daily_distance_km is not None
+            and vehicle.usable_range_km() <= vehicle.daily_distance_km * 2
+        )
+        lines = [
+            f"{fuel_type.value}: {station.price_cents:.1f} c/L chez {station.name}",
+            f"Cible: {target:.1f} c/L — {location.name}",
+        ]
+        if low_tank:
+            lines.append("Le prix est sous votre cible et votre reservoir est probablement bas.")
+        if trip.net_savings_cad < self.settings.min_net_savings:
+            lines.append(
+                f"La station est moins chere, mais le detour ne vaut que "
+                f"{max(trip.net_savings_cad, 0):.2f} $."
+            )
+        else:
+            lines.append(f"Economie nette estimee: {trip.net_savings_cad:.2f} $.")
+        if rank is not None:
+            lines.append(
+                f"Le prix actuel se situe au {rank:.0f}e percentile des "
+                f"{min(len(history), 90)} jours d’historique."
+            )
+        lines.append(f"{station.source}. Prix recent, a verifier a la pompe.")
+        return "\n".join(lines)
+
+    async def send_weekly_summary(self) -> None:
+        sections = []
+        snapshot = self.repository.dashboard_snapshot(self.settings.max_price_age_minutes)
+        for location in self._locations():
+            for fuel_type in {vehicle.fuel_type for vehicle in self.settings.configured_vehicles}:
+                prices = [
+                    row
+                    for row in snapshot
+                    if row["location_key"] == location.key and row["fuel_type"] == fuel_type.value
+                ]
+                if not prices:
+                    continue
+                current = min(float(row["price_cents"]) for row in prices)
+                history = self.repository.daily_minimums(location.key, fuel_type, 90)
+                rank = (
+                    100 * sum(value <= current for value in history) / len(history)
+                    if history
+                    else None
+                )
+                station = min(prices, key=lambda row: float(row["price_cents"]))
+                sections.append(
+                    f"{location.name} · {fuel_type.value}: {current:.1f} c/L chez {station['name']}"
+                    + (f" · {rank:.0f}e percentile" if rank is not None else "")
+                )
+        fillups = self.repository.fillup_statistics(7)
+        sections.append(
+            f"7 derniers jours: {fillups['spending_cad']:.2f} $ depenses · "
+            f"{fillups['savings_cad']:.2f} $ economises."
+        )
+        if not sections:
+            return
+        try:
+            await self.notifier.send("⛽ GasWatch — Resume hebdomadaire", "\n".join(sections))
+        except Exception:
+            logger.exception("Echec du resume hebdomadaire")
 
     async def send_daily_reports(self) -> None:
         today = datetime.now(UTC).date()

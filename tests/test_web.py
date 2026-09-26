@@ -3,7 +3,29 @@ from datetime import UTC, datetime
 from app.config import Settings
 from app.database import Repository
 from app.domain import FuelType, StationPrice
-from app.web import STATIC_DIR, _updated_station_preferences, render_dashboard
+from app.web import (
+    STATIC_DIR,
+    _decode_form,
+    _updated_station_preferences,
+    render_dashboard,
+    render_fillups,
+    render_statistics,
+)
+
+
+def test_multipart_form_decodes_receipt() -> None:
+    boundary = "gaswatch-boundary"
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nEssence\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="receipt"; filename="recu.pdf"\r\n'
+        "Content-Type: application/pdf\r\n\r\n%PDF-test\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+
+    form, files = _decode_form(body, f"multipart/form-data; boundary={boundary}")
+
+    assert form["note"] == ["Essence"]
+    assert files["receipt"] == ("recu.pdf", "application/pdf", b"%PDF-test")
 
 
 def test_home_screen_icons_are_packaged() -> None:
@@ -61,6 +83,26 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "https://maps.apple.com/?q=Costco+Quebec%2C+440+rue+Bouvier" in page
     assert 'rel="apple-touch-icon" sizes="180x180"' in page
     assert "--green:#71d99b" in page
+    assert "Médiane actuelle" in page
+    assert "Économie brute / plein" in page
+    assert "Coût estimé du détour" in page
+    assert "Économie nette" in page
+    assert "Confiance" in page
+    assert "Fraîcheur" in page
+    statistics_page = render_statistics(repository, settings)
+    assert "Minimum, moyenne et maximum" in statistics_page
+    assert "24 h" in statistics_page
+    assert "data-toggle-series" in statistics_page
+    assert "Distribution des prix" in statistics_page
+    assert "Calendrier des prix minimums" in statistics_page
+    assert "Classement des stations" in statistics_page
+    fillups_page = render_fillups(repository, settings)
+    assert "Enregistrer un plein" in fillups_page
+    assert "Économies cette année" in fillups_page
+    assert "Exporter CSV" in fillups_page
+    assert "Reçu (JPG, PNG ou PDF" in fillups_page
+    assert "Coût mensuel et consommation" in fillups_page
+    assert "Réservoir rempli complètement" in fillups_page
 
 
 def test_dashboard_has_empty_state(tmp_path, monkeypatch) -> None:

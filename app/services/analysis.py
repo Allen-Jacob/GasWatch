@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import math
 import statistics
+from dataclasses import dataclass
 
 from app.domain import PriceStats, StationPrice
+
+
+@dataclass(frozen=True, slots=True)
+class Forecast:
+    horizon_hours: int
+    price_cents: float
+    confidence: str
+    reliable: bool
 
 
 def percentile(values: list[float], percent: float) -> float | None:
@@ -52,6 +61,22 @@ def predict_price_direction(values: list[float]) -> tuple[str, float, str]:
         fit = 1 - residual_variation / total_variation if total_variation else 1.0
         confidence = "fort" if fit >= 0.75 else "modéré" if fit >= 0.4 else "faible"
     return direction, slope, confidence
+
+
+def forecast_prices(values: list[float]) -> list[Forecast]:
+    """Return conservative 24/48-hour forecasts only when the fit is usable."""
+    recent = values[-14:]
+    if len(recent) < 7:
+        return []
+    direction, slope, confidence = predict_price_direction(recent)
+    if direction == "unknown" or confidence == "faible":
+        return []
+    # Limit extrapolation to a plausible short-term pump-price movement.
+    daily_slope = max(min(slope, 5.0), -5.0)
+    return [
+        Forecast(hours, recent[-1] + daily_slope * hours / 24, confidence, True)
+        for hours in (24, 48)
+    ]
 
 
 def analyze(prices: list[StationPrice], history: list[float], target: float | None) -> PriceStats:

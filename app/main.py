@@ -55,6 +55,20 @@ async def run() -> None:
             max_instances=1,
             coalesce=True,
         )
+    if settings.weekly_summary_enabled:
+        hour, minute = map(int, settings.weekly_summary_time.split(":"))
+        scheduler.add_job(
+            service.send_weekly_summary,
+            CronTrigger(
+                day_of_week=settings.weekly_summary_day,
+                hour=hour,
+                minute=minute,
+                timezone=settings.tz,
+            ),
+            id="weekly-summary",
+            max_instances=1,
+            coalesce=True,
+        )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
