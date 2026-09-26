@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from app.domain import FuelType, StationPrice
-from app.services.analysis import analyze, percentile, predict_price_direction
+from app.services.analysis import analyze, forecast_prices, percentile, predict_price_direction
 
 
 def station(price: float) -> StationPrice:
@@ -42,3 +42,10 @@ def test_predict_price_direction_uses_recent_local_trend() -> None:
     assert predict_price_direction([154, 153, 152])[0] == "down"
     assert predict_price_direction([150, 150.1, 150.1])[0] == "stable"
     assert predict_price_direction([150])[0] == "unknown"
+
+
+def test_forecast_requires_enough_reliable_data() -> None:
+    assert forecast_prices([150, 151, 152]) == []
+    forecasts = forecast_prices([150, 151, 152, 153, 154, 155, 156])
+    assert [forecast.horizon_hours for forecast in forecasts] == [24, 48]
+    assert forecasts[0].price_cents == 157

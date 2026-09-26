@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     preferred_only: bool = False
     preferred_price_tolerance_cents: float = Field(default=2, ge=0)
     favorite_station_ids: str = ""
+    max_detour_km: float = Field(default=8, ge=0, le=100)
+    min_net_savings: float = Field(default=2, ge=0)
 
     price_check_interval_minutes: int = Field(default=60, ge=10)
     max_price_age_minutes: int = Field(default=180, gt=0)
@@ -63,6 +65,9 @@ class Settings(BaseSettings):
 
     daily_report_enabled: bool = True
     daily_report_time: str = "07:00"
+    weekly_summary_enabled: bool = True
+    weekly_summary_day: int = Field(default=6, ge=0, le=6)
+    weekly_summary_time: str = "18:00"
     price_alerts_enabled: bool = True
     alert_cooldown_hours: int = Field(default=12, ge=1)
     alert_min_price_drop_cents: float = Field(default=3, ge=0)
@@ -85,7 +90,7 @@ class Settings(BaseSettings):
             raise ValueError("TARGET_PRICE_MODE doit etre AUTO ou MANUAL")
         return normalized
 
-    @field_validator("daily_report_time")
+    @field_validator("daily_report_time", "weekly_summary_time")
     @classmethod
     def valid_time(cls, value: str) -> str:
         pieces = value.split(":")
