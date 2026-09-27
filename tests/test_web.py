@@ -9,6 +9,7 @@ from app.web import (
     _updated_station_preferences,
     render_dashboard,
     render_fillups,
+    render_settings,
     render_statistics,
 )
 
@@ -61,8 +62,9 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Costco Quebec" in page
     assert "159.9" in page
     assert "stations disponibles" in page
-    assert "Mes réglages" in page
-    assert 'class="settings-menu"' in page
+    assert 'class="active" href="/stations"' in page
+    assert 'href="/settings">Paramètres</a>' in page
+    assert 'class="settings-menu"' not in page
     assert "Ajouter aux favoris" in page
     assert "Ne plus afficher cette station" in page
     assert 'name="favorite_station_id"' not in page
@@ -89,6 +91,13 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Économie nette" in page
     assert "Confiance" in page
     assert "Fraîcheur" in page
+    home_page = render_dashboard(repository, settings, page="home")
+    assert "Vue d’ensemble" in home_page
+    assert "Voir et comparer toutes les stations" in home_page
+    assert 'class="active" href="/">Accueil</a>' in home_page
+    settings_page = render_settings(repository, settings)
+    assert "Zone de recherche" in settings_page
+    assert 'class="active" href="/settings">Paramètres</a>' in settings_page
     statistics_page = render_statistics(repository, settings)
     assert "Minimum, moyenne et maximum" in statistics_page
     assert "24 h" in statistics_page
@@ -96,6 +105,7 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Distribution des prix" in statistics_page
     assert "Calendrier des prix minimums" in statistics_page
     assert "Classement des stations" in statistics_page
+    repository.save_runtime_settings({"FAVORITE_STATION_IDS": "id-1"}, tmp_path / "runtime.env")
     fillups_page = render_fillups(repository, settings)
     assert "Enregistrer un plein" in fillups_page
     assert "Économies cette année" in fillups_page
@@ -103,6 +113,8 @@ def test_dashboard_renders_saved_stations(tmp_path, monkeypatch) -> None:
     assert "Reçu (JPG, PNG ou PDF" in fillups_page
     assert "Coût mensuel et consommation" in fillups_page
     assert "Réservoir rempli complètement" in fillups_page
+    assert '<optgroup label="Mes stations favorites">' in fillups_page
+    assert "★ Costco Quebec — 440 rue Bouvier — 159.9 c/L · 5.5 km" in fillups_page
 
 
 def test_dashboard_has_empty_state(tmp_path, monkeypatch) -> None:

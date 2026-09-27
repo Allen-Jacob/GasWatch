@@ -314,11 +314,10 @@ def _recommendation_banner(
     """
 
 
-def render_dashboard(repository: Repository, settings: Settings) -> str:
+def render_dashboard(repository: Repository, settings: Settings, *, page: str = "stations") -> str:
     runtime = repository.runtime_settings()
     favorite_ids = _station_ids(runtime.get("FAVORITE_STATION_IDS", ""))
     excluded_ids = _station_ids(runtime.get("EXCLUDED_STATION_IDS", ""))
-    all_snapshot = repository.dashboard_snapshot()
     snapshot = [
         row
         for row in repository.dashboard_snapshot(settings.max_price_age_minutes)
@@ -343,33 +342,7 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
     for row in snapshot:
         groups[(row["location_key"], row["fuel_type"])].append(row)
 
-    primary_location = settings.configured_locations[0]
-    latitude = runtime.get("HOME_LATITUDE", str(primary_location.latitude))
-    longitude = runtime.get("HOME_LONGITUDE", str(primary_location.longitude))
-    radius = runtime.get("SEARCH_RADIUS_KM", str(primary_location.radius_km))
     location_names = {location.key: location.name for location in settings.configured_locations}
-    excluded_by_id = {
-        str(row["station_id"]): row
-        for row in all_snapshot
-        if str(row["station_id"]) in excluded_ids
-    }
-    excluded_controls = "".join(
-        f"""
-        <form method="post" action="/station-preference" class="excluded-station">
-          <input type="hidden" name="csrf" value="{{csrf_token}}">
-          <input type="hidden" name="station_id" value="{html.escape(station_id)}">
-          <input type="hidden" name="action" value="include">
-          <span><strong>{html.escape(str(row["name"]))}</strong>
-            <small>{html.escape(str(row["address"]))}</small></span>
-          <button type="submit">Reafficher</button>
-        </form>
-        """
-        for station_id, row in excluded_by_id.items()
-    )
-    vehicle_summary = ", ".join(
-        f"{vehicle.name} ({vehicle.fuel_type.value}, {vehicle.average_fill_l:.0f} L)"
-        for vehicle in settings.configured_vehicles
-    )
 
     def metric(value: float | None, suffix: str = " c/L") -> str:
         return f"{value:+.1f}{suffix}" if value is not None else "—"
@@ -639,6 +612,24 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
         )
 
     generated = datetime.now(UTC).astimezone(ZoneInfo(settings.tz)).strftime("%Y-%m-%d %H:%M %Z")
+    is_home = page == "home"
+    page_heading = "Vue d’ensemble" if is_home else "Stations autour de vous"
+    page_subtitle = (
+        "Le meilleur moment et le meilleur prix, en un coup d’œil"
+        if is_home
+        else "Comparez les prix, les distances et vos stations favorites"
+    )
+    navigation = (
+        f'<a class="{"active" if is_home else ""}" href="/">Accueil</a>'
+        f'<a class="{"" if is_home else "active"}" href="/stations">Stations</a>'
+        '<a href="/fillups">Pleins</a><a href="/analytics">Analytics</a>'
+        '<a href="/settings">Paramètres</a>'
+    )
+    home_cta = (
+        '<p class="home-cta"><a href="/stations">Voir et comparer toutes les stations →</a></p>'
+        if is_home
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta name="description" content="Tableau de bord local GasWatch">
@@ -654,6 +645,9 @@ def render_dashboard(repository: Repository, settings: Settings) -> str:
 @media(prefers-color-scheme:light){{:root{{--ink:#24211d;--muted:#6b665d;--panel:#fffdf7;--panel2:#f3eee2;--line:#d8d0bf;--accent:#8a6513;--soft:#49360c;--dim:#81796b;--black:#f6f2e8}}}}
 body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,sans-serif}}
 .main-nav{{display:flex;gap:6px;margin:-12px 0 24px;overflow:auto}}.main-nav a{{color:var(--muted);text-decoration:none;padding:8px 12px;border-radius:9px}}.main-nav a:hover,.main-nav a.active{{color:var(--black);background:var(--accent)}}
+.page-intro{{margin:0 0 20px}}.page-intro h2{{font-size:1.8rem}}.page-intro p{{color:var(--muted);margin:4px 0 0}}
+.home-cta{{text-align:center;margin:4px 0 24px}}.home-cta a{{display:inline-block;color:var(--black);background:var(--accent);padding:10px 15px;border-radius:10px;font-weight:800;text-decoration:none}}
+.home-view .station-list-head,.home-view .station-list,.home-view .kpi-grid{{display:none}}
 .shell{{width:min(1180px,calc(100% - 32px));margin:auto;padding:34px 0 64px}}
 header{{position:relative;z-index:5;display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px}}
 h1{{font-size:clamp(2rem,5vw,4rem);letter-spacing:-.06em;line-height:.9;margin:0}}h1 b{{color:var(--accent)}}
@@ -765,23 +759,13 @@ font-size:.95rem!important;font-weight:950;vertical-align:.15em;letter-spacing:0
 .station-card summary>span:nth-child(3),.station-card summary>span:nth-child(4){{display:none}}
 .station-price{{padding-right:3px}}.station-actions{{gap:3px}}.icon-button{{width:32px;height:32px}}.station-detail{{grid-template-columns:1fr;padding:18px}}.station-stats{{grid-template-columns:1fr 1fr}}
 footer{{display:block}}}}
-</style></head><body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
-<p>Prix recents autour de vos emplacements</p></div><div class="header-tools">
-<p>Actualisation automatique<br>toutes les 60 secondes</p><details class="settings-menu" id="settings">
-<summary aria-label="Ouvrir mes réglages" title="Mes réglages">⚙</summary>
-<section class="settings"><h2>Mes réglages</h2>
-<form method="post" action="/settings" class="settings-form">
-<input type="hidden" name="csrf" value="{{csrf_token}}">
-<label>Latitude<input name="latitude" inputmode="decimal" required value="{html.escape(latitude)}"></label>
-<label>Longitude<input name="longitude" inputmode="decimal" required value="{html.escape(longitude)}"></label>
-<label>Rayon (km)<input name="radius" inputmode="decimal" required value="{html.escape(radius)}"></label>
-<button type="submit">Enregistrer</button></form>
-<p>Utilisez l'etoile a cote d'une station pour la garder en haut. La position est envoyee uniquement a Gas Quebec pour la recherche.</p>
-<div class="settings-summary"><p><strong>Collectes</strong><br>Toutes les {settings.price_check_interval_minutes} minutes · conservation horaire continue</p><p><strong>Véhicules</strong><br>{html.escape(vehicle_summary)}</p><p><strong>Notifications</strong><br>{"ntfy activé" if settings.ntfy_enabled else "ntfy désactivé"} · rapport quotidien {"activé" if settings.daily_report_enabled else "désactivé"}</p></div>
-{f'<div class="excluded-list"><h3>Stations exclues</h3>{excluded_controls}</div>' if excluded_controls else ""}</section></details></div></header>
-<nav class="main-nav" aria-label="Navigation principale"><a class="active" href="/">Accueil</a><a href="/#stations">Stations</a><a href="/fillups">Pleins</a><a href="/analytics">Analytics</a><a href="/#settings">Paramètres</a></nav>
+</style></head><body class="{"home-view" if is_home else "stations-view"}"><main class="shell"><header><div><h1>Gas<b>Watch</b></h1>
+<p>Prix récents autour de vos emplacements</p></div><div class="header-tools">
+<p>Actualisation automatique<br>toutes les 60 secondes</p></div></header>
+<nav class="main-nav" aria-label="Navigation principale">{navigation}</nav>
+<div class="page-intro"><h2>{page_heading}</h2><p>{page_subtitle}</p></div>
 {"".join(advice_banners)}
-<div id="stations">{"".join(sections)}</div>
+{home_cta}<div id="stations">{"".join(sections)}</div>
 <footer><span>* Distance geographique, pas routiere.</span><span>Page generee {generated}</span></footer>
 </main><div id="chart-tooltip" role="tooltip"></div><script>
 for (const detail of document.querySelectorAll('[data-station]')) {{
@@ -827,6 +811,45 @@ for (const point of document.querySelectorAll('.chart-point')) {{
   point.addEventListener('blur', () => chartTooltip.classList.remove('visible'));
 }}
 </script></body></html>"""
+
+
+def render_settings(repository: Repository, settings: Settings) -> str:
+    runtime = repository.runtime_settings()
+    primary_location = settings.configured_locations[0]
+    latitude = runtime.get("HOME_LATITUDE", str(primary_location.latitude))
+    longitude = runtime.get("HOME_LONGITUDE", str(primary_location.longitude))
+    radius = runtime.get("SEARCH_RADIUS_KM", str(primary_location.radius_km))
+    excluded_ids = _station_ids(runtime.get("EXCLUDED_STATION_IDS", ""))
+    excluded_rows = {
+        str(row["station_id"]): row
+        for row in repository.dashboard_snapshot()
+        if str(row["station_id"]) in excluded_ids
+    }
+    excluded_controls = "".join(
+        f"""
+        <form method="post" action="/station-preference" class="excluded-station">
+          <input type="hidden" name="csrf" value="{{csrf_token}}">
+          <input type="hidden" name="station_id" value="{html.escape(station_id)}">
+          <input type="hidden" name="action" value="include">
+          <span><strong>{html.escape(str(row["name"]))}</strong>
+            <small>{html.escape(str(row["address"]))}</small></span>
+          <button type="submit">Réafficher</button>
+        </form>
+        """
+        for station_id, row in excluded_rows.items()
+    )
+    vehicle_summary = ", ".join(
+        f"{vehicle.name} ({vehicle.fuel_type.value}, {vehicle.average_fill_l:.0f} L)"
+        for vehicle in settings.configured_vehicles
+    )
+    return f"""<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Paramètres · GasWatch</title>
+    <style>:root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;--accent:#e6c77a;--black:#0e0e0d;--green:#71d99b}}*{{box-sizing:border-box}}body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 system-ui,sans-serif}}.shell{{width:min(900px,calc(100% - 28px));margin:auto;padding:32px 0 60px}}h1{{font-size:clamp(2rem,5vw,4rem);margin:0}}h1 b{{color:var(--accent)}}header p,.help,small{{color:var(--muted)}}nav{{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0}}a{{color:var(--muted);padding:8px 12px;text-decoration:none;border-radius:9px}}a.active,a:hover{{background:var(--accent);color:var(--black)}}section{{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;margin:18px 0}}.settings-form{{display:grid;grid-template-columns:1fr 1fr .7fr auto;gap:12px;align-items:end}}label{{display:grid;gap:6px;color:var(--muted);font-size:.8rem}}input,button{{font:inherit;border:1px solid var(--line);border-radius:9px;padding:10px 12px}}input{{background:var(--black);color:var(--ink);min-width:0}}button{{background:var(--accent);color:#171512;font-weight:800;cursor:pointer}}.summary-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.summary-grid div{{background:var(--panel2);border-radius:10px;padding:14px}}.summary-grid span{{display:block;color:var(--muted);font-size:.75rem;text-transform:uppercase}}.excluded-station{{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--line);padding:12px 0}}.excluded-station strong,.excluded-station small{{display:block}}.notice{{color:var(--green)}}@media(max-width:700px){{.settings-form,.summary-grid{{grid-template-columns:1fr}}}}</style></head>
+    <body><main class="shell"><header><h1>Gas<b>Watch</b></h1><p>Paramètres</p></header>
+    <nav aria-label="Navigation principale"><a href="/">Accueil</a><a href="/stations">Stations</a><a href="/fillups">Pleins</a><a href="/analytics">Analytics</a><a class="active" href="/settings">Paramètres</a></nav>
+    <section><h2>Zone de recherche</h2><form method="post" action="/settings" class="settings-form"><input type="hidden" name="csrf" value="{{csrf_token}}"><label>Latitude<input name="latitude" inputmode="decimal" required value="{html.escape(latitude)}"></label><label>Longitude<input name="longitude" inputmode="decimal" required value="{html.escape(longitude)}"></label><label>Rayon (km)<input name="radius" inputmode="decimal" required value="{html.escape(radius)}"></label><button type="submit">Enregistrer</button></form><p class="help">La position est envoyée uniquement à Gas Québec pour rechercher les stations à proximité.</p></section>
+    <section><h2>Configuration actuelle</h2><div class="summary-grid"><div><span>Collectes</span><strong>Toutes les {settings.price_check_interval_minutes} minutes</strong></div><div><span>Véhicules</span><strong>{html.escape(vehicle_summary)}</strong></div><div><span>Notifications</span><strong>{"ntfy activé" if settings.ntfy_enabled else "ntfy désactivé"} · rapport quotidien {"activé" if settings.daily_report_enabled else "désactivé"}</strong></div></div></section>
+    {f"<section><h2>Stations masquées</h2>{excluded_controls}</section>" if excluded_controls else ""}
+    </main></body></html>"""
 
 
 def _render_fillups_legacy(repository: Repository, settings: Settings) -> str:
@@ -879,6 +902,7 @@ def render_fillups(
     until_date: date | None = None,
 ) -> str:
     snapshot = repository.dashboard_snapshot(settings.max_price_age_minutes)
+    favorite_ids = _station_ids(repository.runtime_settings().get("FAVORITE_STATION_IDS", ""))
     today = datetime.now(ZoneInfo(settings.tz)).date()
     market_average = (
         statistics.fmean(float(row["price_cents"]) for row in snapshot) if snapshot else None
@@ -901,9 +925,32 @@ def render_fillups(
         f'<option value="{html.escape(vehicle.key)}" {"selected" if vehicle.key == vehicle_filter else ""}>{html.escape(vehicle.name)}</option>'
         for vehicle in settings.configured_vehicles
     )
-    station_options = "".join(
-        f'<option value="{html.escape(str(row["station_id"]))}" data-price="{float(row["price_cents"]):.1f}">{html.escape(str(row["name"]))} — {float(row["price_cents"]):.1f} c/L</option>'
-        for row in snapshot
+
+    def station_option(row: dict[str, object]) -> str:
+        station_id = str(row["station_id"])
+        favorite = "★ " if station_id in favorite_ids else ""
+        label = (
+            f"{favorite}{row['name']} — {row['address']} — "
+            f"{float(row['price_cents']):.1f} c/L · {float(row['distance_km']):.1f} km"
+        )
+        return (
+            f'<option value="{html.escape(station_id)}" '
+            f'data-price="{float(row["price_cents"]):.1f}">{html.escape(label)}</option>'
+        )
+
+    favorite_stations = [row for row in snapshot if str(row["station_id"]) in favorite_ids]
+    other_stations = [row for row in snapshot if str(row["station_id"]) not in favorite_ids]
+    station_options = ""
+    if favorite_stations:
+        station_options += (
+            '<optgroup label="Mes stations favorites">'
+            + "".join(station_option(row) for row in favorite_stations)
+            + "</optgroup>"
+        )
+    station_options += (
+        '<optgroup label="Toutes les autres stations">'
+        + "".join(station_option(row) for row in other_stations)
+        + "</optgroup>"
     )
     history_parts = []
     for row in rows:
@@ -943,7 +990,7 @@ def render_fillups(
     average_label = f"{market_average:.1f} c/L" if market_average is not None else "en attente"
     return f"""<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Journal des pleins · GasWatch</title>
     <style>:root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;--accent:#e6c77a;--black:#0e0e0d;--green:#71d99b;--red:#ef7d72}}*{{box-sizing:border-box}}body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 system-ui,sans-serif}}.shell{{width:min(1180px,calc(100% - 28px));margin:auto;padding:32px 0 60px}}h1{{font-size:clamp(2rem,5vw,4rem);margin:0}}h1 b{{color:var(--accent)}}nav{{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0}}a{{color:var(--muted);padding:8px 12px;text-decoration:none;border-radius:9px}}a.active,a:hover{{background:var(--accent);color:var(--black)}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0}}.stats div,section{{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}}.stats span,label{{display:block;color:var(--muted);font-size:.8rem}}.stats strong{{font-size:1.3rem}}form{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}.edit-form{{grid-template-columns:1fr;min-width:260px}}input,select,button{{width:100%;padding:11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink)}}input[type=checkbox]{{width:auto}}button{{background:var(--accent);color:var(--black);font-weight:800;cursor:pointer}}button.danger{{background:var(--red);margin-top:6px}}table{{width:100%;border-collapse:collapse;margin-top:12px}}th,td{{padding:10px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}}.table{{overflow:auto}}.filters{{display:flex;align-items:end;gap:8px;margin-bottom:14px}}.filters>*{{flex:1}}@media(max-width:720px){{.stats{{grid-template-columns:1fr 1fr}}form,.filters{{display:grid;grid-template-columns:1fr}}}}</style></head>
-    <body><main class="shell"><header><h1>Gas<b>Watch</b></h1><p>Journal des pleins</p></header><nav><a href="/">Accueil</a><a class="active" href="/fillups">Pleins</a><a href="/analytics">Analytics</a></nav>
+    <body><main class="shell"><header><h1>Gas<b>Watch</b></h1><p>Journal des pleins</p></header><nav><a href="/">Accueil</a><a href="/stations">Stations</a><a class="active" href="/fillups">Pleins</a><a href="/analytics">Analytics</a><a href="/settings">Paramètres</a></nav>
     <div class="stats"><div><span>Essence ce mois-ci</span><strong>{amount(month["liters"], " L")}</strong></div><div><span>Dépenses ce mois-ci</span><strong>{month["spending_cad"]:.2f} $</strong></div><div><span>Prix moyen payé</span><strong>{amount(month["average_price_cents"], " c/L")}</strong></div><div><span>Consommation réelle</span><strong>{amount(lifetime["consumption_l_per_100km"], " L/100 km")}</strong></div><div><span>Coût moyen / 100 km</span><strong>{amount(lifetime["cost_per_100km"], " $")}</strong></div><div><span>Économies ce mois-ci</span><strong>{month["savings_cad"]:.2f} $</strong></div><div><span>Économies cette année</span><strong>{year["savings_cad"]:.2f} $</strong></div><div><span>Depuis l’installation</span><strong>{lifetime["savings_cad"]:.2f} $</strong></div></div>
     <section><h2>Enregistrer un plein</h2><form method="post" action="/fillups" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{csrf_token}}"><label>Date<input type="date" name="filled_at" required value="{today.isoformat()}"></label><label>Véhicule<select name="vehicle_key" required>{vehicle_options}</select></label><label>Station<select name="station_id" id="station" required>{station_options}</select></label><label>Prix (c/L)<input name="price_cents" id="price" type="number" min="1" step="0.1" required></label><label>Litres<input name="liters" type="number" min="0.1" step="0.1" required></label><label>Odomètre (optionnel)<input name="odometer_km" type="number" min="0" step="1"></label><label>Note<input name="note" maxlength="500"></label><label>Reçu (JPG, PNG ou PDF, 5 Mo max.)<input name="receipt" type="file" accept="image/jpeg,image/png,application/pdf"></label><label><input type="checkbox" name="is_full_tank" value="1" checked> Réservoir rempli complètement</label><button type="submit">Enregistrer le plein</button></form><p>Prix moyen du secteur enregistré automatiquement : {average_label}.</p></section>
     <section><h2>Coût mensuel et consommation</h2><div class="table"><table><thead><tr><th>Véhicule</th><th>Coût ce mois</th><th>Réelle</th><th>Théorique</th><th>Écart</th></tr></thead><tbody>{comparison_rows}</tbody></table></div></section>
@@ -1202,7 +1249,7 @@ def render_statistics(repository: Repository, settings: Settings, days: int | No
     return f"""<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Statistiques · GasWatch</title>
     <style>@media(prefers-color-scheme:light){{:root{{--ink:#24211d!important;--muted:#6b665d!important;--panel:#fffdf7!important;--panel2:#f3eee2!important;--line:#d8d0bf!important;--accent:#8a6513!important;--black:#f6f2e8!important}}}}</style>
     <style>:root{{--ink:#f4f1e8;--muted:#aaa69d;--panel:#171715;--panel2:#201f1c;--line:#393732;--accent:#e6c77a;--black:#0e0e0d;--green:#71d99b;--red:#ef7d72;--blue:#70b8d7}}*{{box-sizing:border-box}}body{{margin:0;background:var(--black);color:var(--ink);font:16px/1.5 system-ui,sans-serif}}.shell{{width:min(1180px,calc(100% - 28px));margin:auto;padding:32px 0 60px}}header{{display:flex;align-items:end;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:clamp(2rem,5vw,4rem)}}h1 b,.eyebrow{{color:var(--accent)}}nav,.periods,.series-toggles{{display:flex;gap:6px;flex-wrap:wrap}}nav{{margin:18px 0}}a{{color:var(--muted);text-decoration:none;padding:8px 12px;border-radius:9px}}a.active,a:hover{{background:var(--accent);color:var(--black)}}.periods{{margin-bottom:20px}}.periods a{{border:1px solid var(--line)}}.analysis-section,.analysis-grid article,.cheapest{{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:20px}}.stat-grid,.records{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:16px 0}}.stat-grid div,.records div{{background:var(--panel2);padding:14px;border-radius:10px}}.stat-grid span,.records span{{display:block;color:var(--muted);font-size:.7rem;text-transform:uppercase}}.stat-grid strong{{font-size:1.1rem}}.analysis-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}.analysis-grid article{{margin:0;min-width:0}}.analysis-chart,.chart{{width:100%;height:auto;max-height:260px}}.series-line{{fill:none;stroke-width:3}}.series-minimum{{stroke:var(--green);fill:var(--green)}}.series-average,.series-prediction{{stroke:var(--accent);fill:var(--accent)}}.series-maximum{{stroke:var(--red);fill:var(--red)}}.series-change,.series-actual{{stroke:var(--blue);fill:var(--blue)}}.series-point{{stroke-width:1}}.series-toggles label{{color:var(--muted);font-size:.8rem}}.chart polyline{{fill:none;stroke:var(--accent);stroke-width:3}}.chart-point{{fill:var(--panel);stroke:var(--accent);stroke-width:3}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-top:1px solid var(--line);text-align:left;white-space:nowrap}}.table-scroll{{overflow:auto}}details summary{{cursor:pointer;color:var(--accent);padding:6px}}p{{color:var(--muted)}}.distribution-row{{display:grid;grid-template-columns:90px 1fr 48px;gap:8px;align-items:center;margin:10px 0}}.distribution-row i{{height:12px;background:var(--accent);border-radius:8px;min-width:2px}}.heatmap{{display:grid;grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:5px}}.heat-cell{{display:grid;place-items:center;aspect-ratio:1;border-radius:8px;background:color-mix(in srgb,var(--green) calc((1 - var(--heat))*100%),var(--red));color:#111}}.heat-cell small{{font-size:.65rem}}@media(max-width:760px){{.stat-grid,.records{{grid-template-columns:1fr 1fr}}.analysis-grid{{grid-template-columns:1fr}}}}</style></head>
-    <body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1><p>Analytics</p></div></header><nav><a href="/">Accueil</a><a href="/fillups">Pleins</a><a class="active" href="/analytics">Analytics</a></nav><div class="periods">{period_links}</div>{"".join(sections) or empty}</main><script>for(const input of document.querySelectorAll('[data-toggle-series]')){{input.addEventListener('change',()=>{{for(const node of document.querySelectorAll(`.series-${{input.dataset.toggleSeries}}`))node.style.display=input.checked?'':'none'}})}});</script></body></html>"""
+    <body><main class="shell"><header><div><h1>Gas<b>Watch</b></h1><p>Analytics</p></div></header><nav><a href="/">Accueil</a><a href="/stations">Stations</a><a href="/fillups">Pleins</a><a class="active" href="/analytics">Analytics</a><a href="/settings">Paramètres</a></nav><div class="periods">{period_links}</div>{"".join(sections) or empty}</main><script>for(const input of document.querySelectorAll('[data-toggle-series]')){{input.addEventListener('change',()=>{{for(const node of document.querySelectorAll(`.series-${{input.dataset.toggleSeries}}`))node.style.display=input.checked?'':'none'}})}});</script></body></html>"""
 
 
 class DashboardServer:
@@ -1429,22 +1476,32 @@ class DashboardServer:
                     self.send_header("X-Content-Type-Options", "nosniff")
                     self.end_headers()
                     self.wfile.write(data)
-                elif path == "/":
-                    page = render_dashboard(outer.repository, outer.settings).replace(
+                elif path == "/settings":
+                    page = render_settings(outer.repository, outer.settings).replace(
                         "{csrf_token}", outer._csrf_token
                     )
-                    saved = parse_qs(urlparse(self.path).query).get("saved")
-                    if saved in (["1"], ["station"]):
-                        message = (
-                            "Preference de station sauvegardee."
-                            if saved == ["station"]
-                            else "Reglages sauvegardes. Ils seront utilises a la prochaine collecte."
-                        )
+                    if parse_qs(parsed.query).get("saved") == ["1"]:
                         page = page.replace(
-                            "</header>",
-                            f'</header><div class="notice" role="status">{message}</div>',
+                            "</nav>",
+                            '</nav><p class="notice" role="status">Paramètres enregistrés. Ils seront utilisés à la prochaine collecte.</p>',
                             1,
                         )
+                    self._send(HTTPStatus.OK, "text/html; charset=utf-8", page.encode())
+                elif path == "/stations":
+                    page = render_dashboard(
+                        outer.repository, outer.settings, page="stations"
+                    ).replace("{csrf_token}", outer._csrf_token)
+                    if parse_qs(parsed.query).get("saved") == ["station"]:
+                        page = page.replace(
+                            "</nav>",
+                            '</nav><div class="notice" role="status">Préférence de station enregistrée.</div>',
+                            1,
+                        )
+                    self._send(HTTPStatus.OK, "text/html; charset=utf-8", page.encode())
+                elif path == "/":
+                    page = render_dashboard(outer.repository, outer.settings, page="home").replace(
+                        "{csrf_token}", outer._csrf_token
+                    )
                     body = page.encode()
                     self._send(HTTPStatus.OK, "text/html; charset=utf-8", body)
                 else:
@@ -1599,8 +1656,17 @@ class DashboardServer:
                     except (TypeError, ValueError):
                         self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"Invalid station")
                         return
+                    return_hash = form.get("return_hash", [""])[0]
+                    safe_hash = "".join(
+                        character
+                        for character in return_hash
+                        if character.isalnum() or character in "-_"
+                    )
+                    destination = "/stations?saved=station"
+                    if safe_hash:
+                        destination += f"#{safe_hash}"
                     self.send_response(HTTPStatus.SEE_OTHER)
-                    self.send_header("Location", "/?saved=station")
+                    self.send_header("Location", destination)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
@@ -1624,7 +1690,7 @@ class DashboardServer:
                     self._send(HTTPStatus.BAD_REQUEST, "text/plain", b"Invalid settings")
                     return
                 self.send_response(HTTPStatus.SEE_OTHER)
-                self.send_header("Location", "/?saved=1")
+                self.send_header("Location", "/settings?saved=1")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
